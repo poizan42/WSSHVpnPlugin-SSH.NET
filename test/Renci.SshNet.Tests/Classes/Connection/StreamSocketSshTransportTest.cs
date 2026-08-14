@@ -242,6 +242,76 @@ namespace Renci.SshNet.Tests.Classes.Connection
             Assert.IsFalse(_transport.IsConnected);
         }
 
+        [TestMethod]
+        [Timeout(1000)]
+        public void Read_WhetherTheAdapterHonoursTheAmbientSynchronizationContext()
+        {
+            Connect();
+            var serverSocket = WaitForServerSocket();
+
+            var context = new RecordingSynchronizationContext();
+            var previous = SynchronizationContext.Current;
+            SynchronizationContext.SetSynchronizationContext(context);
+            try
+            {
+                // Nothing is available when the read is issued, so it has to complete
+                // asynchronously - which is the only case where a captured context could be used.
+                var sender = new Thread(() =>
+                {
+                    Thread.Sleep(100);
+                    _ = serverSocket.Send(new byte[] { 0x7F });
+                });
+                sender.Start();
+
+                var read = _transport.Read(new byte[4], 0, 4, Timeout.InfiniteTimeSpan);
+                sender.Join();
+
+                Assert.AreEqual(1, read);
+            }
+            finally
+            {
+                SynchronizationContext.SetSynchronizationContext(previous);
+            }
+
+            const string message = "The blocking read routed continuations through the ambient " +
+                "SynchronizationContext. That means a single-threaded context would deadlock it, and " +
+                "the blocking bridge is only safe because session threads carry no context.";
+
+            Assert.AreEqual(0, context.Posts + context.Sends, message);
+        }
+
+        /// <summary>
+        /// Records whether anything routed work through the ambient context, without being
+        /// single-threaded - so it diagnoses the dependency instead of deadlocking on it.
+        /// </summary>
+        private sealed class RecordingSynchronizationContext : SynchronizationContext
+        {
+            private int _posts;
+            private int _sends;
+
+            public int Posts
+            {
+                get { return Volatile.Read(ref _posts); }
+            }
+
+            public int Sends
+            {
+                get { return Volatile.Read(ref _sends); }
+            }
+
+            public override void Post(SendOrPostCallback d, object state)
+            {
+                _ = Interlocked.Increment(ref _posts);
+                _ = ThreadPool.QueueUserWorkItem(_ => d(state));
+            }
+
+            public override void Send(SendOrPostCallback d, object state)
+            {
+                _ = Interlocked.Increment(ref _sends);
+                d(state);
+            }
+        }
+
         private void Connect()
         {
             _transport = StreamSocketSshTransport.ConnectAsync(
