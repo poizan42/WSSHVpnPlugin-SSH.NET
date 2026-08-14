@@ -125,10 +125,7 @@ namespace Renci.SshNet.Connection
             {
                 try
                 {
-                    return Complete(() => _input.ReadAsync(buffer.AsMemory(offset, count), cts.Token)
-                                                .AsTask()
-                                                .GetAwaiter()
-                                                .GetResult());
+                    return Complete(() => ReadBlocking(buffer, offset, count, cts.Token));
                 }
                 catch (OperationCanceledException) when (cts.IsCancellationRequested)
                 {
@@ -253,6 +250,32 @@ namespace Renci.SshNet.Connection
             }
 
             return bytesRead;
+        }
+
+        /// <summary>
+        /// Performs a cancellable read, blocking until it completes.
+        /// </summary>
+        /// <param name="buffer">The buffer to write the received bytes to.</param>
+        /// <param name="offset">The position in <paramref name="buffer"/> at which to start writing.</param>
+        /// <param name="count">The maximum number of bytes to read.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>
+        /// The number of bytes read.
+        /// </returns>
+        private int ReadBlocking(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            // Blocking on a ValueTask that has not completed is not supported, so only that case is
+            // turned into a Task. Converting unconditionally would allocate one per read even when
+            // the data was already to hand, and the banner exchange reads a byte at a time.
+            //
+            // Preserve makes the ValueTask safe to inspect and then consume: it hands back itself
+            // when the read already completed, and materialises a Task only when it did not, which
+            // is the case that needs one regardless.
+            var read = _input.ReadAsync(buffer.AsMemory(offset, count), cancellationToken).Preserve();
+
+            return read.IsCompletedSuccessfully
+                ? read.Result
+                : read.AsTask().GetAwaiter().GetResult();
         }
 
         /// <summary>

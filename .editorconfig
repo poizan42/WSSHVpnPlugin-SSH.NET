@@ -328,6 +328,13 @@ dotnet_diagnostic.S4581.severity = none
 # https://rules.sonarsource.com/csharp/RSPEC-4830/
 dotnet_diagnostic.S4830.severity = none
 
+# S5034: "ValueTask" should be consumed correctly
+# https://rules.sonarsource.com/csharp/RSPEC-5034/
+#
+# Duplicate of CA2012, which does the job properly: it understands that ValueTask.Preserve() makes
+# repeated consumption legal, whereas this rule flags the pattern regardless.
+dotnet_diagnostic.S5034.severity = none
+
 # S5542: Encryption algorithms should be used with secure mode and padding scheme
 # https://rules.sonarsource.com/csharp/RSPEC-5542/
 dotnet_diagnostic.S5542.severity = none
