@@ -180,21 +180,24 @@ namespace Renci.SshNet.Tests.Classes.Connection
 
         [TestMethod]
         [Timeout(1000)]
-        public void Shutdown_InterruptsBlockedRead()
+        public void Shutdown_InterruptsBlockedRead_WhichReportsCleanClose()
         {
             Connect();
             _ = WaitForServerSocket();
 
             var readReturned = new ManualResetEventSlim(initialState: false);
+            var result = -1;
+            Exception thrown = null;
+
             var reader = new Thread(() =>
             {
                 try
                 {
-                    _ = _transport.Read(new byte[16], 0, 16, Timeout.InfiniteTimeSpan);
+                    result = _transport.Read(new byte[16], 0, 16, Timeout.InfiniteTimeSpan);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // Recorded by the assertion below via readReturned not being set on success only.
+                    thrown = ex;
                 }
                 finally
                 {
@@ -209,6 +212,12 @@ namespace Renci.SshNet.Tests.Classes.Connection
 
             Assert.IsTrue(readReturned.Wait(WaitTimeout), "Shutdown did not interrupt the blocked read.");
             reader.Join();
+
+            // This is the path production takes: the message listener is already blocked when the
+            // session tears the transport down. Whatever the adapter raises has to be classified as
+            // teardown, or the session reports a failure on an orderly disconnect.
+            Assert.IsNull(thrown, $"Interrupting the read should report a clean close, but it threw {thrown}.");
+            Assert.AreEqual(0, result);
         }
 
         [TestMethod]

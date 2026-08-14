@@ -272,6 +272,22 @@ namespace Renci.SshNet.Connection
         /// <returns>
         /// <see langword="true"/> if the exception is a consequence of teardown; otherwise, <see langword="false"/>.
         /// </returns>
+        private static bool IsTeardownStatus(Exception exception)
+        {
+            // The WinRT stream adapter surfaces socket failures as COMException, sometimes wrapped
+            // in an IOException, so the status can be on either.
+            var hresult = exception is COMException
+                ? exception.HResult
+                : exception.InnerException?.HResult ?? exception.HResult;
+
+            // Verified by test: interrupting a blocked read with CancelIOAsync surfaces as an
+            // IOException whose status is OperationAborted, and a peer reset as ConnectionResetByPeer.
+            return SocketError.GetStatus(hresult) is SocketErrorStatus.OperationAborted
+                or SocketErrorStatus.ConnectionResetByPeer
+                or SocketErrorStatus.NetworkDroppedConnectionOnReset
+                or SocketErrorStatus.SoftwareCausedConnectionAbort;
+        }
+
         private bool IsExpectedDuringTeardown(Exception exception)
         {
             if (!HasShutDown)
@@ -279,9 +295,12 @@ namespace Renci.SshNet.Connection
                 return false;
             }
 
-            // COMException is included because that is how the WinRT stream adapter surfaces socket
-            // failures, including the one CancelIOAsync provokes.
-            return exception is IOException or ObjectDisposedException or OperationCanceledException or COMException;
+            // Disposing the adapters and cancelling the read are our own doing, so those types are
+            // unambiguous. Anything else has to name a socket status that actually means the
+            // connection went away - a COMException reporting something unrelated is a real failure
+            // and must not be mistaken for an orderly close just because it landed during teardown.
+            return exception is ObjectDisposedException or OperationCanceledException
+                || IsTeardownStatus(exception);
         }
     }
 }
