@@ -90,7 +90,7 @@ namespace Renci.SshNet.Tests.Classes
                               .Returns(_clientSocket);
             _ = _serviceFactoryMock.Setup(p => p.CreateProtocolVersionExchange())
                                    .Returns(_protocolVersionExchangeMock.Object);
-            _ = _protocolVersionExchangeMock.Setup(p => p.Start(_session.ClientVersion, _clientSocket, _connectionInfo.Timeout))
+            _ = _protocolVersionExchangeMock.Setup(p => p.Start(_session.ClientVersion, It.IsAny<SshTransport>(), _connectionInfo.Timeout))
                                             .Returns(new SshIdentification("2.0", "XXX"));
         }
 

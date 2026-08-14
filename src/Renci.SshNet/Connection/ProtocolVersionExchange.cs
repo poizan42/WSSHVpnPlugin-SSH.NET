@@ -7,7 +7,6 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
-using Renci.SshNet.Abstractions;
 using Renci.SshNet.Common;
 using Renci.SshNet.Messages.Transport;
 
@@ -41,16 +40,17 @@ namespace Renci.SshNet.Connection
         /// Performs the SSH protocol version exchange.
         /// </summary>
         /// <param name="clientVersion">The identification string of the SSH client.</param>
-        /// <param name="socket">A <see cref="Socket"/> connected to the server.</param>
+        /// <param name="transport">An <see cref="SshTransport"/> connected to the server.</param>
         /// <param name="timeout">The maximum time to wait for the server to respond.</param>
         /// <returns>
         /// The SSH identification of the server.
         /// </returns>
-        public SshIdentification Start(string clientVersion, Socket socket, TimeSpan timeout)
+        public SshIdentification Start(string clientVersion, SshTransport transport, TimeSpan timeout)
         {
             // Immediately send the identification string since the spec states both sides MUST send an identification string
             // when the connection has been established
-            SocketAbstraction.Send(socket, Encoding.UTF8.GetBytes(clientVersion + "\x0D\x0A"));
+            var clientIdentification = Encoding.UTF8.GetBytes(clientVersion + "\x0D\x0A");
+            transport.Write(clientIdentification, 0, clientIdentification.Length);
 
             var bytesReceived = new List<byte>();
 
@@ -58,7 +58,7 @@ namespace Renci.SshNet.Connection
             // ignore text lines which are sent before if any
             for (var n = 0; n < MaximumBannerLines; n++)
             {
-                var line = SocketReadLine(socket, timeout, bytesReceived);
+                var line = TransportReadLine(transport, timeout, bytesReceived);
 
                 var identificationMatch = ServerVersionRegex.Match(line);
                 if (identificationMatch.Success)
@@ -76,21 +76,18 @@ namespace Renci.SshNet.Connection
         /// Asynchronously performs the SSH protocol version exchange.
         /// </summary>
         /// <param name="clientVersion">The identification string of the SSH client.</param>
-        /// <param name="socket">A <see cref="Socket"/> connected to the server.</param>
+        /// <param name="transport">An <see cref="SshTransport"/> connected to the server.</param>
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         /// <returns>
         /// A task that represents the SSH protocol version exchange. The value of its
         /// <see cref="Task{Task}.Result"/> contains the SSH identification of the server.
         /// </returns>
-        public async Task<SshIdentification> StartAsync(string clientVersion, Socket socket, CancellationToken cancellationToken)
+        public async Task<SshIdentification> StartAsync(string clientVersion, SshTransport transport, CancellationToken cancellationToken)
         {
             // Immediately send the identification string since the spec states both sides MUST send an identification string
             // when the connection has been established
-#if NET
-            await SocketAbstraction.SendAsync(socket, Encoding.UTF8.GetBytes(clientVersion + "\x0D\x0A"), cancellationToken).ConfigureAwait(false);
-#else
-            SocketAbstraction.Send(socket, Encoding.UTF8.GetBytes(clientVersion + "\x0D\x0A"));
-#endif // NET
+            var clientIdentification = Encoding.UTF8.GetBytes(clientVersion + "\x0D\x0A");
+            await transport.WriteAsync(clientIdentification, 0, clientIdentification.Length, cancellationToken).ConfigureAwait(false);
 
             var bytesReceived = new List<byte>();
 
@@ -98,7 +95,7 @@ namespace Renci.SshNet.Connection
             // ignore text lines which are sent before if any
             for (var n = 0; n < MaximumBannerLines; n++)
             {
-                var line = await SocketReadLineAsync(socket, bytesReceived, cancellationToken).ConfigureAwait(false);
+                var line = await TransportReadLineAsync(transport, bytesReceived, cancellationToken).ConfigureAwait(false);
 
                 var identificationMatch = ServerVersionRegex.Match(line);
                 if (identificationMatch.Success)
@@ -124,14 +121,14 @@ namespace Renci.SshNet.Connection
         }
 
         /// <summary>
-        /// Performs a blocking read on the socket until a line is read.
+        /// Performs a blocking read on the transport until a line is read.
         /// </summary>
-        /// <param name="socket">The <see cref="Socket"/> to read from.</param>
+        /// <param name="transport">The <see cref="SshTransport"/> to read from.</param>
         /// <param name="timeout">A <see cref="TimeSpan"/> that represents the time to wait until a line is read.</param>
         /// <param name="buffer">A <see cref="List{Byte}"/> to which read bytes will be added.</param>
         /// <exception cref="SshOperationTimeoutException">The read has timed-out.</exception>
-        /// <exception cref="SocketException">An error occurred when trying to access the socket.</exception>
-        private static string SocketReadLine(Socket socket, TimeSpan timeout, List<byte> buffer)
+        /// <exception cref="SocketException">An error occurred when trying to access the transport.</exception>
+        private static string TransportReadLine(SshTransport transport, TimeSpan timeout, List<byte> buffer)
         {
             var data = new byte[1];
 
@@ -139,7 +136,7 @@ namespace Renci.SshNet.Connection
 
             while (buffer.Count < MaximumBannerLineLength)
             {
-                var bytesRead = SocketAbstraction.Read(socket, data, 0, data.Length, timeout);
+                var bytesRead = transport.Read(data, 0, data.Length, timeout);
                 if (bytesRead == 0)
                 {
                     throw CreateConnectionLostException();
@@ -173,7 +170,7 @@ namespace Renci.SshNet.Connection
             throw CreateBannerLineTooLongException();
         }
 
-        private static async Task<string> SocketReadLineAsync(Socket socket, List<byte> buffer, CancellationToken cancellationToken)
+        private static async Task<string> TransportReadLineAsync(SshTransport transport, List<byte> buffer, CancellationToken cancellationToken)
         {
             var data = new byte[1];
 
@@ -181,7 +178,7 @@ namespace Renci.SshNet.Connection
 
             while (buffer.Count < MaximumBannerLineLength)
             {
-                var bytesRead = await SocketAbstraction.ReadAsync(socket, data, cancellationToken).ConfigureAwait(false);
+                var bytesRead = await transport.ReadAsync(data, 0, data.Length, cancellationToken).ConfigureAwait(false);
                 if (bytesRead == 0)
                 {
                     throw CreateConnectionLostException();

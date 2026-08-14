@@ -77,7 +77,7 @@ namespace Renci.SshNet.Tests.Classes.Connection
 
         protected void Act()
         {
-            _actual = _protocolVersionExchange.Start(_clientVersion, _client, _timeout);
+            _actual = _protocolVersionExchange.Start(_clientVersion, new SocketSshTransport(_client), _timeout);
 
             // Give some time to process all messages
             Thread.Sleep(200);

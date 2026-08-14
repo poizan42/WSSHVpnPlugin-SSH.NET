@@ -15,6 +15,11 @@ namespace Renci.SshNet.Abstractions
             return socket.ReceiveAsync(buffer, SocketFlags.None, cancellationToken);
         }
 
+        public static ValueTask<int> ReadAsync(Socket socket, byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            return socket.ReceiveAsync(buffer.AsMemory(offset, count), SocketFlags.None, cancellationToken);
+        }
+
         public static ValueTask SendAsync(Socket socket, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
         {
             Debug.Assert(socket != null);

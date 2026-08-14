@@ -290,6 +290,11 @@ namespace Renci.SshNet.Abstractions
         {
             return socket.ReceiveAsync(buffer, 0, buffer.Length, cancellationToken);
         }
+
+        public static Task<int> ReadAsync(Socket socket, byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            return socket.ReceiveAsync(buffer, offset, count, cancellationToken);
+        }
 #endif
 
         public static void Send(Socket socket, byte[] data)

@@ -79,7 +79,7 @@ namespace Renci.SshNet.Tests.Classes.Connection
         {
             try
             {
-                _ = _protocolVersionExchange.Start(_clientVersion, _client, _timeout);
+                _ = _protocolVersionExchange.Start(_clientVersion, new SocketSshTransport(_client), _timeout);
                 Assert.Fail();
             }
             catch (SshConnectionException ex)

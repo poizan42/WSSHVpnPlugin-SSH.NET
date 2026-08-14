@@ -81,7 +81,7 @@ namespace Renci.SshNet
 
         /// <summary>
         /// Holds an object that is used to ensure only a single thread can write to
-        /// <see cref="_socket"/> at any given time.
+        /// <see cref="_transport"/> at any given time.
         /// </summary>
         /// <remarks>
         /// This is also used to ensure that <see cref="_outboundPacketSequence"/> is
@@ -91,11 +91,11 @@ namespace Renci.SshNet
 
         /// <summary>
         /// Holds an object that is used to ensure only a single thread can dispose
-        /// <see cref="_socket"/> at any given time.
+        /// <see cref="_transport"/> at any given time.
         /// </summary>
         /// <remarks>
-        /// This is also used to ensure that <see cref="_socket"/> will not be disposed
-        /// while performing a given operation or set of operations on <see cref="_socket"/>.
+        /// This is also used to ensure that <see cref="_transport"/> will not be disposed
+        /// while performing a given operation or set of operations on <see cref="_transport"/>.
         /// </remarks>
         private readonly Lock _socketDisposeLock = new Lock();
 
@@ -209,7 +209,7 @@ namespace Renci.SshNet
         /// <summary>
         /// Holds connection socket.
         /// </summary>
-        private Socket _socket;
+        private SshTransport _transport;
 
         private ArrayBuffer _receiveBuffer = new(4 * 1024);
         private byte[] _sendBuffer = new byte[4 * 1024];
@@ -290,7 +290,7 @@ namespace Renci.SshNet
                     !_isDisconnectMessageSent &&
                     _isAuthenticated &&
                     _messageListenerCompleted?.WaitOne(0) == false &&
-                    _socket.IsConnected();
+                    _transport is { IsConnected: true };
             }
         }
 
@@ -599,11 +599,13 @@ namespace Renci.SshNet
                 // Build list of available messages while connecting
                 _sshMessageFactory = new SshMessageFactory();
 
-                _socket = _serviceFactory.CreateConnector(ConnectionInfo, _socketFactory)
-                                            .Connect(ConnectionInfo);
+                _transport = ConnectionInfo.TransportFactory is { } transportFactory
+                    ? transportFactory.Connect(ConnectionInfo.Host, ConnectionInfo.Port, ConnectionInfo.Timeout)
+                    : new SocketSshTransport(_serviceFactory.CreateConnector(ConnectionInfo, _socketFactory)
+                                                            .Connect(ConnectionInfo));
 
                 var serverIdentification = _serviceFactory.CreateProtocolVersionExchange()
-                                                            .Start(ClientVersion, _socket, ConnectionInfo.Timeout);
+                                                            .Start(ClientVersion, _transport, ConnectionInfo.Timeout);
 
                 // Set connection versions
                 ServerVersion = ConnectionInfo.ServerVersion = serverIdentification.ToString();
@@ -724,11 +726,13 @@ namespace Renci.SshNet
                 // Build list of available messages while connecting
                 _sshMessageFactory = new SshMessageFactory();
 
-                _socket = await _serviceFactory.CreateConnector(ConnectionInfo, _socketFactory)
-                                            .ConnectAsync(ConnectionInfo, cancellationToken).ConfigureAwait(false);
+                _transport = ConnectionInfo.TransportFactory is { } transportFactory
+                    ? await transportFactory.ConnectAsync(ConnectionInfo.Host, ConnectionInfo.Port, cancellationToken).ConfigureAwait(false)
+                    : new SocketSshTransport(await _serviceFactory.CreateConnector(ConnectionInfo, _socketFactory)
+                                                                  .ConnectAsync(ConnectionInfo, cancellationToken).ConfigureAwait(false));
 
                 var serverIdentification = await _serviceFactory.CreateProtocolVersionExchange()
-                                                            .StartAsync(ClientVersion, _socket, cancellationToken).ConfigureAwait(false);
+                                                            .StartAsync(ClientVersion, _transport, cancellationToken).ConfigureAwait(false);
 
                 // Set connection versions
                 ServerVersion = ConnectionInfo.ServerVersion = serverIdentification.ToString();
@@ -1045,7 +1049,7 @@ namespace Renci.SshNet
         /// <exception cref="InvalidOperationException">The size of the packet exceeds the maximum size defined by the protocol.</exception>
         internal void SendMessage(Message message)
         {
-            if (!_socket.IsConnected())
+            if (_transport is not { IsConnected: true })
             {
                 throw new SshConnectionException("Client not connected.");
             }
@@ -1174,12 +1178,12 @@ namespace Renci.SshNet
         {
             lock (_socketDisposeLock)
             {
-                if (!_socket.IsConnected())
+                if (_transport is not { IsConnected: true })
                 {
                     throw new SshConnectionException("Client not connected.");
                 }
 
-                SocketAbstraction.Send(_socket, packet, offset, length);
+                _transport.Write(packet, offset, length);
             }
         }
 
@@ -1223,7 +1227,7 @@ namespace Renci.SshNet
         /// <remarks>
         /// We need no locking here since all messages are read by a single thread.
         /// </remarks>
-        private Message ReceiveMessage(Socket socket)
+        private Message ReceiveMessage(SshTransport transport)
         {
             // The length of the "packet length" field in bytes
             const int packetLengthFieldLength = 4;
@@ -1265,8 +1269,8 @@ namespace Renci.SshNet
 
                 _receiveBuffer.EnsureAvailableSpace(bytesNeeded);
 
-                var bytesRead = TrySocketRead(
-                    socket,
+                var bytesRead = TryTransportRead(
+                    transport,
                     buffer: _receiveBuffer.DangerousGetUnderlyingBuffer(),
                     offset: _receiveBuffer.ActiveStartOffset + _receiveBuffer.ActiveLength,
                     length: _receiveBuffer.AvailableLength,
@@ -1320,8 +1324,8 @@ namespace Renci.SshNet
 
                 _receiveBuffer.EnsureAvailableSpace(bytesNeeded);
 
-                var bytesRead = TrySocketRead(
-                    socket,
+                var bytesRead = TryTransportRead(
+                    transport,
                     buffer: _receiveBuffer.DangerousGetUnderlyingBuffer(),
                     offset: _receiveBuffer.ActiveStartOffset + _receiveBuffer.ActiveLength,
                     length: _receiveBuffer.AvailableLength,
@@ -1908,9 +1912,9 @@ namespace Renci.SshNet
         }
 
         /// <summary>
-        /// Performs a blocking read on the socket until at least <paramref name="minimumLength"/> bytes are received.
+        /// Performs a blocking read on the transport until at least <paramref name="minimumLength"/> bytes are received.
         /// </summary>
-        /// <param name="socket">The <see cref="Socket"/> to read from.</param>
+        /// <param name="transport">The <see cref="SshTransport"/> to read from.</param>
         /// <param name="buffer">An array of type <see cref="byte"/> that is the storage location for the received data.</param>
         /// <param name="offset">The position in <paramref name="buffer"/> parameter to store the received data.</param>
         /// <param name="length">The maximum number of bytes to read.</param>
@@ -1919,13 +1923,13 @@ namespace Renci.SshNet
         /// The number of bytes read.
         /// </returns>
         /// <exception cref="SocketException">The read failed.</exception>
-        private static int TrySocketRead(Socket socket, byte[] buffer, int offset, int length, int minimumLength)
+        private static int TryTransportRead(SshTransport transport, byte[] buffer, int offset, int length, int minimumLength)
         {
             Debug.Assert(offset >= 0);
             Debug.Assert((uint)length <= buffer.Length - offset);
             Debug.Assert(minimumLength <= length);
 
-            if (socket is null)
+            if (transport is null)
             {
                 return 0;
             }
@@ -1933,7 +1937,7 @@ namespace Renci.SshNet
             var totalRead = 0;
             while (totalRead < minimumLength)
             {
-                var read = socket.Receive(buffer, offset + totalRead, length - totalRead, SocketFlags.None);
+                var read = transport.Read(buffer, offset + totalRead, length - totalRead, Timeout.InfiniteTimeSpan);
 
                 if (read == 0)
                 {
@@ -1947,18 +1951,18 @@ namespace Renci.SshNet
         }
 
         /// <summary>
-        /// Shuts down and disposes the socket.
+        /// Shuts down and disposes the transport.
         /// </summary>
         private void SocketDisconnectAndDispose()
         {
             lock (_socketDisposeLock)
             {
-                if (_socket is null)
+                if (_transport is null)
                 {
                     return;
                 }
 
-                if (_socket.Connected)
+                if (_transport.IsConnected)
                 {
                     try
                     {
@@ -1970,7 +1974,7 @@ namespace Renci.SshNet
                         // This may result in a SocketException (eg. An existing connection was forcibly
                         // closed by the remote host) which we'll log and ignore as it means the socket
                         // was already shut down.
-                        _socket.Shutdown(SocketShutdown.Both);
+                        _transport.Shutdown();
                     }
                     catch (SocketException ex)
                     {
@@ -1979,9 +1983,9 @@ namespace Renci.SshNet
                 }
 
                 _logger.LogDebug("[{SessionId}] Disposing socket.", SessionIdHex);
-                _socket.Dispose();
+                _transport.Dispose();
                 _logger.LogDebug("[{SessionId}] Disposed socket.", SessionIdHex);
-                _socket = null;
+                _transport = null;
             }
         }
 
@@ -1992,15 +1996,10 @@ namespace Renci.SshNet
         {
             try
             {
-                if (_socket is { } s)
-                {
-                    s.ReceiveTimeout = 0;
-                }
-
-                // remain in message loop until socket is shut down or until we're disconnecting
+                // remain in message loop until the transport is shut down or until we're disconnecting
                 while (true)
                 {
-                    var message = ReceiveMessage(_socket);
+                    var message = ReceiveMessage(_transport);
                     if (message is null)
                     {
                         // Connection with SSH server was closed, so break out of the message loop

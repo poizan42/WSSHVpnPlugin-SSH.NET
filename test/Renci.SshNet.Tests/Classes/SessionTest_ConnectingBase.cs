@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
@@ -211,7 +211,7 @@ namespace Renci.SshNet.Tests.Classes
                              .Returns(ClientSocket);
             _ = ServiceFactoryMock.Setup(p => p.CreateProtocolVersionExchange())
                                   .Returns(_protocolVersionExchangeMock.Object);
-            _ = _protocolVersionExchangeMock.Setup(p => p.Start(Session.ClientVersion, ClientSocket, ConnectionInfo.Timeout))
+            _ = _protocolVersionExchangeMock.Setup(p => p.Start(Session.ClientVersion, It.IsAny<SshTransport>(), ConnectionInfo.Timeout))
                                             .Returns(() => ServerIdentification);
             _ = ServiceFactoryMock.Setup(p => p.CreateKeyExchange(ConnectionInfo.KeyExchangeAlgorithms, _keyExchangeAlgorithms)).Returns(_keyExchangeMock.Object);
 

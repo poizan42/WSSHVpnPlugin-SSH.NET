@@ -154,7 +154,7 @@ namespace Renci.SshNet.Tests.Classes
                               .Returns(ClientSocket);
             _ = _serviceFactoryMock.Setup(p => p.CreateProtocolVersionExchange())
                                    .Returns(_protocolVersionExchangeMock.Object);
-            _ = _protocolVersionExchangeMock.Setup(p => p.Start(Session.ClientVersion, ClientSocket, ConnectionInfo.Timeout))
+            _ = _protocolVersionExchangeMock.Setup(p => p.Start(Session.ClientVersion, It.IsAny<SshTransport>(), ConnectionInfo.Timeout))
                                             .Returns(ServerIdentification);
             _ = _serviceFactoryMock.Setup(p => p.CreateKeyExchange(ConnectionInfo.KeyExchangeAlgorithms, new[] { _keyExchangeAlgorithm }))
                                    .Returns(_keyExchangeMock.Object);

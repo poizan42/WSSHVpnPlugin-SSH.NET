@@ -192,6 +192,19 @@ namespace Renci.SshNet
         }
 
         /// <summary>
+        /// Gets or sets the factory that creates the transport carrying the session.
+        /// </summary>
+        /// <value>
+        /// The transport factory, or <see langword="null"/> to connect over a
+        /// <see cref="System.Net.Sockets.Socket"/>. The default is <see langword="null"/>.
+        /// </value>
+        /// <remarks>
+        /// Setting this bypasses the built-in connectors, and with them the proxy settings on this
+        /// instance; the factory becomes responsible for reaching the server.
+        /// </remarks>
+        public Connection.ISshTransportFactory? TransportFactory { get; set; }
+
+        /// <summary>
         /// Gets or sets the character encoding.
         /// </summary>
         /// <value>
