@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -110,6 +111,11 @@ namespace Renci.SshNet.Connection
         /// <inheritdoc/>
         public override int Read(byte[] buffer, int offset, int count, TimeSpan timeout)
         {
+            if (HasShutDown)
+            {
+                return 0;
+            }
+
             if (timeout == Timeout.InfiniteTimeSpan)
             {
                 return Complete(() => _input.Read(buffer, offset, count));
@@ -137,6 +143,11 @@ namespace Renci.SshNet.Connection
         /// <inheritdoc/>
         public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
+            if (HasShutDown)
+            {
+                return 0;
+            }
+
             int read;
             try
             {
@@ -146,6 +157,11 @@ namespace Renci.SshNet.Connection
             {
                 _isConnected = false;
                 return 0;
+            }
+            catch (COMException ex)
+            {
+                _isConnected = false;
+                throw new IOException(ex.Message, ex);
             }
 
             if (read == 0)
@@ -222,6 +238,14 @@ namespace Renci.SshNet.Connection
                 _isConnected = false;
                 return 0;
             }
+            catch (COMException ex)
+            {
+                // The WinRT stream adapter reports socket failures as COMException. Present them as
+                // an I/O failure so that callers see the same shape of error whichever transport is
+                // in use.
+                _isConnected = false;
+                throw new IOException(ex.Message, ex);
+            }
 
             if (bytesRead == 0)
             {
@@ -229,6 +253,14 @@ namespace Renci.SshNet.Connection
             }
 
             return bytesRead;
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether <see cref="Shutdown"/> or <see cref="Dispose(bool)"/> has run.
+        /// </summary>
+        private bool HasShutDown
+        {
+            get { return Volatile.Read(ref _shutdown) != 0; }
         }
 
         /// <summary>
@@ -242,12 +274,14 @@ namespace Renci.SshNet.Connection
         /// </returns>
         private bool IsExpectedDuringTeardown(Exception exception)
         {
-            if (Volatile.Read(ref _shutdown) == 0)
+            if (!HasShutDown)
             {
                 return false;
             }
 
-            return exception is IOException or ObjectDisposedException or OperationCanceledException;
+            // COMException is included because that is how the WinRT stream adapter surfaces socket
+            // failures, including the one CancelIOAsync provokes.
+            return exception is IOException or ObjectDisposedException or OperationCanceledException or COMException;
         }
     }
 }
