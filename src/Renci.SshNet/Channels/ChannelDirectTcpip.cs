@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Microsoft.Extensions.Logging;
 
@@ -22,6 +23,9 @@ namespace Renci.SshNet.Channels
         private EventWaitHandle _channelData = new AutoResetEvent(initialState: false);
         private IForwardedPort _forwardedPort;
         private Socket _socket;
+        private TaskCompletionSource<bool> _openCompletion;
+        private uint _openFailureReason;
+        private string _openFailureDescription;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ChannelDirectTcpip"/> class.
@@ -49,6 +53,87 @@ namespace Renci.SshNet.Channels
 
         public void Open(string remoteHost, uint port, IForwardedPort forwardedPort, Socket socket)
         {
+            EnsureCanOpen();
+
+            _socket = socket;
+            _forwardedPort = forwardedPort;
+            _forwardedPort.Closing += ForwardedPort_Closing;
+
+            var ep = (IPEndPoint)socket.RemoteEndPoint;
+
+            SendChannelOpen(remoteHost, port, ep.Address.ToString(), (uint)ep.Port);
+
+            // Wait for channel to open
+            WaitOnHandle(_channelOpen);
+        }
+
+        /// <summary>
+        /// Opens a channel to a remote host without binding it to a socket.
+        /// </summary>
+        /// <param name="remoteHost">The name of the remote host to forward to.</param>
+        /// <param name="port">The port of the remote host to forward to.</param>
+        /// <param name="originatorAddress">The address to report as the originator of the connection.</param>
+        /// <param name="originatorPort">The port to report as the originator of the connection.</param>
+        /// <exception cref="SshException">The channel is already open, the session is not connected, or the server refused the channel.</exception>
+        /// <remarks>
+        /// The originator endpoint is informational: the protocol carries it to the server, which may
+        /// log it, and nothing depends on it locally. Callers that are not forwarding an accepted
+        /// connection can report whatever identifies the flow.
+        /// </remarks>
+        public void Open(string remoteHost, uint port, string originatorAddress, uint originatorPort)
+        {
+            EnsureCanOpen();
+
+            SendChannelOpen(remoteHost, port, originatorAddress, originatorPort);
+
+            WaitOnHandle(_channelOpen);
+
+            if (!IsOpen)
+            {
+                throw CreateOpenFailedException();
+            }
+        }
+
+        /// <summary>
+        /// Opens a channel to a remote host without binding it to a socket, asynchronously.
+        /// </summary>
+        /// <param name="remoteHost">The name of the remote host to forward to.</param>
+        /// <param name="port">The port of the remote host to forward to.</param>
+        /// <param name="originatorAddress">The address to report as the originator of the connection.</param>
+        /// <param name="originatorPort">The port to report as the originator of the connection.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A task that represents the open.</returns>
+        /// <exception cref="SshException">The channel is already open, the session is not connected, or the server refused the channel.</exception>
+        /// <remarks>
+        /// The returned task also faults when the session fails or is disconnected while the open is
+        /// outstanding. Open confirmation and open failure are not the only ways this can end, and
+        /// without that a dropped connection would leave the caller waiting indefinitely.
+        /// </remarks>
+        public async Task OpenAsync(string remoteHost, uint port, string originatorAddress, uint originatorPort, CancellationToken cancellationToken)
+        {
+            EnsureCanOpen();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Continuations run off the message listener thread: whatever the caller does next must
+            // not execute inside the session's message loop.
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _openCompletion = completion;
+
+            SendChannelOpen(remoteHost, port, originatorAddress, originatorPort);
+
+            using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state).TrySetCanceled(), completion, useSynchronizationContext: false))
+            {
+                _ = await completion.Task.ConfigureAwait(false);
+            }
+
+            if (!IsOpen)
+            {
+                throw CreateOpenFailedException();
+            }
+        }
+
+        private void EnsureCanOpen()
+        {
             if (IsOpen)
             {
                 throw new SshException("Channel is already open.");
@@ -58,21 +143,23 @@ namespace Renci.SshNet.Channels
             {
                 throw new SshException("Session is not connected.");
             }
+        }
 
-            _socket = socket;
-            _forwardedPort = forwardedPort;
-            _forwardedPort.Closing += ForwardedPort_Closing;
-
-            var ep = (IPEndPoint)socket.RemoteEndPoint;
-
-            // Open channel
+        private void SendChannelOpen(string remoteHost, uint port, string originatorAddress, uint originatorPort)
+        {
             SendMessage(new ChannelOpenMessage(LocalChannelNumber,
                                                LocalWindowSize,
                                                LocalPacketSize,
-                                               new DirectTcpipChannelInfo(remoteHost, port, ep.Address.ToString(), (uint)ep.Port)));
+                                               new DirectTcpipChannelInfo(remoteHost, port, originatorAddress, originatorPort)));
+        }
 
-            // Wait for channel to open
-            WaitOnHandle(_channelOpen);
+        private SshException CreateOpenFailedException()
+        {
+            return new SshException(string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "The server refused to open the channel: {0} (reason {1}).",
+                _openFailureDescription ?? "no description given",
+                _openFailureReason));
         }
 
         /// <summary>
@@ -220,14 +307,22 @@ namespace Renci.SshNet.Channels
         {
             base.OnOpenConfirmation(remoteChannelNumber, initialWindowSize, maximumPacketSize);
 
-            _ = _channelOpen.Set();
+            _ = _channelOpen?.Set();
+            _ = _openCompletion?.TrySetResult(true);
         }
 
         protected override void OnOpenFailure(uint reasonCode, string description, string language)
         {
             base.OnOpenFailure(reasonCode, description, language);
 
-            _ = _channelOpen.Set();
+            _openFailureReason = reasonCode;
+            _openFailureDescription = description;
+
+            _ = _channelOpen?.Set();
+
+            // Completed rather than faulted: the caller is told by the IsOpen check, which keeps the
+            // sync and async paths reporting a refusal the same way.
+            _ = _openCompletion?.TrySetResult(false);
         }
 
         /// <summary>
@@ -253,6 +348,9 @@ namespace Renci.SshNet.Channels
         {
             base.OnErrorOccurred(exp);
 
+            // An open in flight ends here too, not only at confirmation or failure.
+            _ = _openCompletion?.TrySetException(exp);
+
             // signal to the client that we will not send anything anymore; this will also interrupt the
             // blocking receive in Bind if the client sends FIN/ACK in time
             //
@@ -270,6 +368,9 @@ namespace Renci.SshNet.Channels
         protected override void OnDisconnected()
         {
             base.OnDisconnected();
+
+            _ = _openCompletion?.TrySetException(
+                new SshConnectionException("The session was disconnected while the channel was being opened."));
 
             // the channel will accept or send no more data, and hence it does not make sense
             // to accept any more data from the client (and we surely won't send anything
