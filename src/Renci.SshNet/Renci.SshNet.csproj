@@ -4,7 +4,22 @@
     <AssemblyName>Renci.SshNet</AssemblyName>
     <Product>SSH.NET</Product>
     <AssemblyTitle>SSH.NET</AssemblyTitle>
-    <TargetFrameworks>net462;netstandard2.0;net8.0;net9.0;net10.0</TargetFrameworks>
+    <!--
+      This fork exists solely to be consumed by WSSHVpnPlugin, so it targets only what that plug-in
+      targets. Collapsing the TFMs is what lets the WinRT StreamSocket transport live here rather
+      than in the plug-in: Windows.Networking.Sockets is not visible from net462, netstandard2.0 or
+      a plain net10.0.
+
+      Deliberately NOT UseUwp: this library only consumes the Windows SDK projection, it authors no
+      WinRT types. Setting UseUwp turns on CsWinRT's authoring analyzers, which then flag every
+      class implementing IDisposable or holding a WaitHandle (CsWinRT1028/CsWinRT1030) - dozens of
+      warnings, and warnings are errors in Release.
+    -->
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+
+    <!-- The plug-in is published Native AOT per RID, so restore has to produce RID-specific assets. -->
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <PropertyGroup>
