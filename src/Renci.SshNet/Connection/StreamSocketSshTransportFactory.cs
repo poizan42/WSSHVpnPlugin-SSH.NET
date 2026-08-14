@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 
 using Microsoft.Extensions.Logging;
 
+using Windows.Networking;
 using Windows.Networking.Sockets;
 
 namespace Renci.SshNet.Connection
@@ -20,6 +21,7 @@ namespace Renci.SshNet.Connection
     public sealed class StreamSocketSshTransportFactory : ISshTransportFactory
     {
         private readonly ILoggerFactory _loggerFactory;
+        private readonly HostName? _localAddress;
 
         private StreamSocketSshTransport? _transport;
 
@@ -27,7 +29,18 @@ namespace Renci.SshNet.Connection
         /// Initializes a new instance of the <see cref="StreamSocketSshTransportFactory"/> class.
         /// </summary>
         public StreamSocketSshTransportFactory()
-            : this(SshNetLoggingConfiguration.LoggerFactory)
+            : this(localAddress: null, SshNetLoggingConfiguration.LoggerFactory)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StreamSocketSshTransportFactory"/> class.
+        /// </summary>
+        /// <param name="localAddress">
+        /// The local address to connect from, or <see langword="null"/> to let the system choose one.
+        /// </param>
+        public StreamSocketSshTransportFactory(HostName? localAddress)
+            : this(localAddress, SshNetLoggingConfiguration.LoggerFactory)
         {
         }
 
@@ -36,9 +49,22 @@ namespace Renci.SshNet.Connection
         /// </summary>
         /// <param name="loggerFactory">The factory used to create the transport's logger.</param>
         public StreamSocketSshTransportFactory(ILoggerFactory loggerFactory)
+            : this(localAddress: null, loggerFactory)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StreamSocketSshTransportFactory"/> class.
+        /// </summary>
+        /// <param name="localAddress">
+        /// The local address to connect from, or <see langword="null"/> to let the system choose one.
+        /// </param>
+        /// <param name="loggerFactory">The factory used to create the transport's logger.</param>
+        public StreamSocketSshTransportFactory(HostName? localAddress, ILoggerFactory loggerFactory)
         {
             ArgumentNullException.ThrowIfNull(loggerFactory);
 
+            _localAddress = localAddress;
             _loggerFactory = loggerFactory;
         }
 
@@ -66,7 +92,7 @@ namespace Renci.SshNet.Connection
         /// <inheritdoc/>
         public async Task<SshTransport> ConnectAsync(string host, int port, CancellationToken cancellationToken)
         {
-            var transport = await StreamSocketSshTransport.ConnectAsync(host, port, _loggerFactory, cancellationToken)
+            var transport = await StreamSocketSshTransport.ConnectAsync(host, port, _localAddress, _loggerFactory, cancellationToken)
                                                           .ConfigureAwait(false);
             _transport = transport;
             return transport;

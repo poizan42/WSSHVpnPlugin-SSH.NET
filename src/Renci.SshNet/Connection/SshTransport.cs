@@ -10,9 +10,8 @@ namespace Renci.SshNet.Connection
     /// <remarks>
     /// <para>
     /// The built-in transport is a <see cref="System.Net.Sockets.Socket"/>. This abstraction exists so
-    /// that a host which cannot use one - such as a Windows VPN plug-in, which has to hand the platform
-    /// a WinRT <c>StreamSocket</c> so the connection can be excluded from the tunnel it carries - can
-    /// supply its own.
+    /// that a host which cannot use one - such as a Windows VPN plug-in, which runs in an app container
+    /// where the WinRT socket types are what is available - can supply its own.
     /// </para>
     /// <para>
     /// Implementations must be safe for a single reader and a single writer running concurrently;

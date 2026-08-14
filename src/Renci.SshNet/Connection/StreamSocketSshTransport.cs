@@ -19,10 +19,12 @@ namespace Renci.SshNet.Connection
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This exists for hosts that must hand the socket carrying the SSH connection to something
-    /// else. A Windows VPN plug-in is the motivating case: the platform has to be given the socket
-    /// so it can keep that traffic out of the tunnel it installs, and it only understands WinRT
-    /// socket objects. Use <see cref="Socket"/> to reach it.
+    /// This exists for hosts that must run the SSH session over a WinRT socket rather than a
+    /// <see cref="System.Net.Sockets.Socket"/>. A Windows VPN plug-in is the motivating case: it
+    /// lives in an app container where only the WinRT socket types are usable, and it needs to
+    /// choose the local interface the session runs over so that its own traffic does not route back
+    /// into the tunnel it installs. Use <see cref="ConnectAsync(string, int, HostName, ILoggerFactory, CancellationToken)"/>
+    /// for that, and <see cref="Socket"/> to reach the socket itself.
     /// </para>
     /// <para>
     /// Both stream adapters are unbuffered. The session frames and buffers itself, and a buffered
@@ -81,9 +83,39 @@ namespace Renci.SshNet.Connection
         /// A task that represents the connection attempt. The value of its
         /// <see cref="Task{TResult}.Result"/> is the connected transport.
         /// </returns>
+        public static Task<StreamSocketSshTransport> ConnectAsync(
+            string host,
+            int port,
+            ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken)
+        {
+            return ConnectAsync(host, port, localAddress: null, loggerFactory, cancellationToken);
+        }
+
+        /// <summary>
+        /// Connects to the specified SSH endpoint from a chosen local address.
+        /// </summary>
+        /// <param name="host">The host name or address of the SSH server.</param>
+        /// <param name="port">The port of the SSH server.</param>
+        /// <param name="localAddress">
+        /// The local address to connect from, or <see langword="null"/> to let the system choose one.
+        /// </param>
+        /// <param name="loggerFactory">The factory used to create the transport's logger.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>
+        /// A task that represents the connection attempt. The value of its
+        /// <see cref="Task{TResult}.Result"/> is the connected transport.
+        /// </returns>
+        /// <remarks>
+        /// Binding the source address is what keeps the session on a particular interface. Note that
+        /// it also stops the connection from going through a configured proxy, and that the operating
+        /// system's forwarding and weak-host settings can still send the packets elsewhere, so this
+        /// is a strong hint rather than a guarantee.
+        /// </remarks>
         public static async Task<StreamSocketSshTransport> ConnectAsync(
             string host,
             int port,
+            HostName localAddress,
             ILoggerFactory loggerFactory,
             CancellationToken cancellationToken)
         {
@@ -95,9 +127,25 @@ namespace Renci.SshNet.Connection
                 socket.Control.NoDelay = true;
                 socket.Control.KeepAlive = true;
 
-                await socket.ConnectAsync(new HostName(host), port.ToString(CultureInfo.InvariantCulture))
-                            .AsTask(cancellationToken)
-                            .ConfigureAwait(false);
+                var service = port.ToString(CultureInfo.InvariantCulture);
+                var remoteAddress = new HostName(host);
+
+                if (localAddress is null)
+                {
+                    await socket.ConnectAsync(remoteAddress, service)
+                                .AsTask(cancellationToken)
+                                .ConfigureAwait(false);
+                }
+                else
+                {
+                    // The local service name has to be the empty string, not null: null is rejected,
+                    // and an empty name asks for an ephemeral port.
+                    var endpointPair = new EndpointPair(localAddress, string.Empty, remoteAddress, service);
+
+                    await socket.ConnectAsync(endpointPair)
+                                .AsTask(cancellationToken)
+                                .ConfigureAwait(false);
+                }
 
                 return new StreamSocketSshTransport(socket, loggerFactory);
             }
