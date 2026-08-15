@@ -18,6 +18,7 @@ namespace Renci.SshNet.Channels
         private readonly Lock _serverWindowSizeLock = new Lock();
         private readonly Lock _messagingLock = new Lock();
         private readonly Lock _sendDataLock = new Lock();
+        private readonly Lock _localWindowLock = new Lock();
         private readonly uint _initialWindowSize;
         private readonly ISession _session;
         private readonly ILogger _logger;
@@ -27,6 +28,16 @@ namespace Renci.SshNet.Channels
         private uint? _remoteChannelNumber;
         private uint? _remotePacketSize;
         private bool _isDisposed;
+
+        /// <summary>
+        /// Bytes the consumer has released that have not yet been credited to the remote party.
+        /// </summary>
+        /// <remarks>
+        /// Only used when <see cref="DeferWindowCredit"/> is set. Credits are batched rather than
+        /// sent per release, because a window adjust per read would put a message on the wire for
+        /// every few bytes consumed.
+        /// </remarks>
+        private uint _uncreditedBytes;
 
         /// <summary>
         /// Holds a value indicating whether the SSH_MSG_CHANNEL_CLOSE has been sent to the remote party.
@@ -69,6 +80,40 @@ namespace Renci.SshNet.Channels
         /// Occurs when an exception is thrown when processing channel messages.
         /// </summary>
         public event EventHandler<ExceptionEventArgs> Exception;
+
+        /// <summary>
+        /// Occurs when the remote party has enlarged the window, so that a send which previously
+        /// reported <see cref="ChannelSendResult.WindowFull"/> may now make progress.
+        /// </summary>
+        /// <remarks>
+        /// Raised on the session's message listener thread. Handlers must be O(1) and must not block
+        /// - setting a flag and queueing work is the intended shape. Anything that waits here stalls
+        /// every channel on the session, because one thread dispatches them all.
+        /// </remarks>
+        public event EventHandler<EventArgs> WindowAvailable;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the local window is credited when the consumer
+        /// releases bytes rather than when they arrive.
+        /// </summary>
+        /// <value>
+        /// <see langword="true"/> to credit on release; otherwise, <see langword="false"/>, which
+        /// credits on receipt. The default is <see langword="false"/>.
+        /// </value>
+        /// <remarks>
+        /// <para>
+        /// Crediting on receipt means the window is never really backpressure: the remote party is
+        /// told it may send more as soon as the bytes arrive, whether or not anything has consumed
+        /// them. That is fine for a consumer that drains promptly, and wrong for one that wants the
+        /// window to throttle a producer it cannot keep up with.
+        /// </para>
+        /// <para>
+        /// A channel that sets this <em>must</em> call <see cref="ReleaseReceivedData"/> as it
+        /// consumes, and flush the credit, or the window shrinks to nothing and the remote party
+        /// stops sending. It is off by default so that existing consumers are unaffected.
+        /// </para>
+        /// </remarks>
+        public bool DeferWindowCredit { get; set; }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Channel"/> class.
@@ -360,6 +405,74 @@ namespace Renci.SshNet.Channels
         }
 
         /// <summary>
+        /// Sends as much of the payload as the remote window currently allows, without waiting.
+        /// </summary>
+        /// <param name="data">An array of <see cref="byte"/> containing the payload to send.</param>
+        /// <param name="offset">The zero-based offset in <paramref name="data"/> at which to begin taking data from.</param>
+        /// <param name="count">The number of bytes of <paramref name="data"/> to send.</param>
+        /// <param name="written">Receives the number of bytes actually sent.</param>
+        /// <returns>
+        /// <see cref="ChannelSendResult.Written"/> when all of it was sent,
+        /// <see cref="ChannelSendResult.WindowFull"/> when the remote window ran out first, or
+        /// <see cref="ChannelSendResult.Closed"/> when the channel is not open.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// The difference from <see cref="SendData(byte[], int, int)"/> is that this never parks. A
+        /// blocking send waits for a window adjust that only the message listener thread can deliver,
+        /// so calling it from that thread stalls the whole session until it times out.
+        /// </para>
+        /// <para>
+        /// The partial count matters as much as the status: with 500 bytes of window and 1360 to
+        /// send, a caller told only "full" must either stall the flow or resend from the start.
+        /// </para>
+        /// </remarks>
+        public ChannelSendResult TrySend(byte[] data, int offset, int count, out int written)
+        {
+            ArgumentNullException.ThrowIfNull(data);
+
+            written = 0;
+
+            if (!IsOpen)
+            {
+                return ChannelSendResult.Closed;
+            }
+
+            lock (_sendDataLock)
+            {
+                while (written < count)
+                {
+                    // Re-checked inside the loop: the channel can close between chunks, and a closed
+                    // channel silently accepting sends is what turns a disconnect into a live spin.
+                    if (!IsOpen)
+                    {
+                        return written == 0 ? ChannelSendResult.Closed : ChannelSendResult.WindowFull;
+                    }
+
+                    uint chunk;
+
+                    lock (_serverWindowSizeLock)
+                    {
+                        chunk = Math.Min(RemotePacketSize, (uint)(count - written));
+                        chunk = Math.Min(chunk, RemoteWindowSize);
+
+                        if (chunk == 0)
+                        {
+                            break;
+                        }
+
+                        RemoteWindowSize -= chunk;
+                    }
+
+                    _session.SendMessage(new ChannelDataMessage(RemoteChannelNumber, data, offset + written, (int)chunk));
+                    written += (int)chunk;
+                }
+            }
+
+            return written == count ? ChannelSendResult.Written : ChannelSendResult.WindowFull;
+        }
+
+        /// <summary>
         /// Called when channel window need to be adjust.
         /// </summary>
         /// <param name="bytesToAdd">The bytes to add.</param>
@@ -370,7 +483,9 @@ namespace Renci.SshNet.Channels
                 RemoteWindowSize += bytesToAdd;
             }
 
-            _ = _channelServerWindowAdjustWaitHandle.Set();
+            _ = _channelServerWindowAdjustWaitHandle?.Set();
+
+            WindowAvailable?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
@@ -767,15 +882,112 @@ namespace Renci.SshNet.Channels
             }
         }
 
+        /// <summary>
+        /// Accounts for data received from the remote party, and credits the window again unless
+        /// crediting has been deferred to the consumer.
+        /// </summary>
+        /// <param name="count">The number of bytes received.</param>
         private void AdjustDataWindow(int count)
         {
-            LocalWindowSize -= (uint)count;
+            uint credit;
 
-            // Adjust window if window size is too low
-            if (LocalWindowSize < LocalPacketSize)
+            lock (_localWindowLock)
             {
-                SendMessage(new ChannelWindowAdjustMessage(RemoteChannelNumber, _initialWindowSize - LocalWindowSize));
+                var received = (uint)count;
+
+                // The remote party sending more than the window allows is a protocol violation. Left
+                // undetected the subtraction wraps, turning "window exceeded" into "window enormous"
+                // and disabling the flow control entirely - invisible at a 2 GiB window, immediate at
+                // a small one.
+                if (received > LocalWindowSize)
+                {
+                    throw new SshException(string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "The remote party sent {0} bytes on channel {1} with only {2} bytes of window remaining.",
+                        received,
+                        LocalChannelNumber,
+                        LocalWindowSize));
+                }
+
+                LocalWindowSize -= received;
+
+                if (DeferWindowCredit)
+                {
+                    // The consumer credits this back through ReleaseReceivedData once it has taken
+                    // the bytes; until then the window is genuinely consumed.
+                    return;
+                }
+
+                if (LocalWindowSize >= LocalPacketSize)
+                {
+                    return;
+                }
+
+                credit = _initialWindowSize - LocalWindowSize;
                 LocalWindowSize = _initialWindowSize;
+            }
+
+            // Outside the lock: sending can block for the duration of a key exchange.
+            SendMessage(new ChannelWindowAdjustMessage(RemoteChannelNumber, credit));
+        }
+
+        /// <summary>
+        /// Records that the consumer has taken bytes off the channel, so that the window may be
+        /// credited back to the remote party.
+        /// </summary>
+        /// <param name="count">The number of bytes consumed.</param>
+        /// <returns>
+        /// <see langword="true"/> if enough has accumulated that <see cref="FlushWindowCredit"/>
+        /// should be called; otherwise, <see langword="false"/>.
+        /// </returns>
+        /// <remarks>
+        /// Deliberately does not send anything. Crediting emits a message, and sending blocks while a
+        /// key exchange is in progress; a consumer draining a buffer must not inherit that. The
+        /// caller records here and flushes from whichever thread it has designated for sending.
+        /// </remarks>
+        public bool ReleaseReceivedData(int count)
+        {
+            if (!DeferWindowCredit || count <= 0)
+            {
+                return false;
+            }
+
+            lock (_localWindowLock)
+            {
+                _uncreditedBytes += (uint)count;
+
+                // Half the window is the usual compromise: often enough that the remote party is not
+                // stalled waiting for room, rare enough that it is not a message per read.
+                return _uncreditedBytes >= _initialWindowSize / 2;
+            }
+        }
+
+        /// <summary>
+        /// Sends the window credit accumulated by <see cref="ReleaseReceivedData"/>.
+        /// </summary>
+        /// <remarks>
+        /// Blocks for the duration of a key exchange, like any other send. Call it from the thread
+        /// that owns sending on the session.
+        /// </remarks>
+        public void FlushWindowCredit()
+        {
+            uint credit;
+
+            lock (_localWindowLock)
+            {
+                if (_uncreditedBytes == 0)
+                {
+                    return;
+                }
+
+                credit = _uncreditedBytes;
+                _uncreditedBytes = 0;
+                LocalWindowSize += credit;
+            }
+
+            if (IsOpen)
+            {
+                SendMessage(new ChannelWindowAdjustMessage(RemoteChannelNumber, credit));
             }
         }
 
@@ -792,13 +1004,21 @@ namespace Renci.SshNet.Channels
 
             do
             {
+                // Captured once per iteration: Dispose nulls this field and disposes the handle, so
+                // reading it twice can hand WaitOnHandle a handle that was disposed in between.
+                var windowAdjusted = _channelServerWindowAdjustWaitHandle;
+                if (windowAdjusted is null)
+                {
+                    return 0;
+                }
+
                 lock (_serverWindowSizeLock)
                 {
                     var serverWindowSize = RemoteWindowSize;
                     if (serverWindowSize == 0U && dataLength > 0)
                     {
                         // Allow us to be signalled when remote window size is adjusted
-                        _ = _channelServerWindowAdjustWaitHandle.Reset();
+                        _ = windowAdjusted.Reset();
                     }
                     else
                     {
@@ -809,7 +1029,7 @@ namespace Renci.SshNet.Channels
                 }
 
                 // Wait for remote window size to change
-                WaitOnHandle(_channelServerWindowAdjustWaitHandle);
+                WaitOnHandle(windowAdjusted);
             }
             while (true);
         }
