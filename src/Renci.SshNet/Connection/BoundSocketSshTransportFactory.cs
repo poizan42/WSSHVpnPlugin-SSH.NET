@@ -68,6 +68,15 @@ namespace Renci.SshNet.Connection
             var socket = new Socket(SocketType.Stream, ProtocolType.Tcp)
             {
                 NoDelay = true,
+
+                // An explicit receive buffer, because it pins the TCP receive window at this size
+                // instead of leaving it to the system's auto-tuning. Measured from inside the VPN
+                // host's app container, auto-tuning never opened the window past ~64 KB - about
+                // 55 KB in flight per round trip, an 8 Mbit/s ceiling at 48 ms - while the same
+                // OpenSSH client outside the container reached 282 Mbit/s on the same link. Every
+                // application-layer window above this was measured healthy first; this is the layer
+                // that was actually binding.
+                ReceiveBufferSize = 4 * 1024 * 1024,
             };
 
             try

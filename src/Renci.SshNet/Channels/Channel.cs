@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net.Sockets;
 using System.Threading;
 
@@ -992,6 +992,9 @@ namespace Renci.SshNet.Channels
             if (IsOpen)
             {
                 SendMessage(new ChannelWindowAdjustMessage(RemoteChannelNumber, credit));
+
+                _ = System.Threading.Interlocked.Increment(ref DirectTcpipStream.WindowAdjustsSent);
+                _ = System.Threading.Interlocked.Add(ref DirectTcpipStream.WindowBytesCredited, credit);
             }
         }
 

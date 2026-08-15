@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Threading;
 
@@ -108,6 +108,18 @@ namespace Renci.SshNet
         {
             get { return _channel.IsOpen; }
         }
+
+        /// <summary>How many window adjustments deferred crediting has sent, across all channels.</summary>
+        /// <remarks>
+        /// Diagnostics for a throughput investigation: roughly 55 KB stays in flight per round trip
+        /// however large the granted window, which is the signature of a sender waiting on credit.
+        /// Whether credit actually flows - and in what sizes - is exactly what these observe. They
+        /// live here rather than on the channel because the channel type is internal.
+        /// </remarks>
+        public static long WindowAdjustsSent;
+
+        /// <summary>How many bytes those adjustments credited.</summary>
+        public static long WindowBytesCredited;
 
         /// <summary>
         /// Gets the window the remote party granted when the channel opened, and how much of it is
