@@ -94,6 +94,20 @@ namespace Renci.SshNet
         IChannelDirectTcpip CreateChannelDirectTcpip();
 
         /// <summary>
+        /// Create a new channel for a locally forwarded TCP/IP port, with a specific window size.
+        /// </summary>
+        /// <param name="localWindowSize">The initial size of the local window.</param>
+        /// <returns>
+        /// A new channel for a locally forwarded TCP/IP port.
+        /// </returns>
+        /// <remarks>
+        /// The default window is deliberately enormous, which makes the window useless as
+        /// backpressure: the remote party is licensed to send far more than any consumer will hold.
+        /// A caller that wants the window to throttle its peer has to choose a smaller one.
+        /// </remarks>
+        IChannelDirectTcpip CreateChannelDirectTcpip(uint localWindowSize);
+
+        /// <summary>
         /// Creates a "forwarded-tcpip" SSH channel.
         /// </summary>
         /// <param name="remoteChannelNumber">The number of the remote channel.</param>

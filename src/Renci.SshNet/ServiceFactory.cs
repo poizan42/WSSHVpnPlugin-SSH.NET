@@ -139,6 +139,26 @@ namespace Renci.SshNet
             return new ShellStream(session, bufferSize);
         }
 
+        /// <inheritdoc/>
+        public DirectTcpipStream CreateDirectTcpipStream(ISession session, string host, uint port, int bufferSize, uint windowSize)
+        {
+            var channel = (Channels.ChannelDirectTcpip)session.CreateChannelDirectTcpip(windowSize);
+
+            try
+            {
+                // The originator endpoint is informational; the server may log it. There is no
+                // accepted connection behind this channel to take a real one from.
+                channel.Open(host, port, "127.0.0.1", 0);
+
+                return new DirectTcpipStream(channel, bufferSize);
+            }
+            catch
+            {
+                channel.Dispose();
+                throw;
+            }
+        }
+
         /// <summary>
         /// Creates an <see cref="IConnector"/> that can be used to establish a connection
         /// to the server identified by the specified <paramref name="connectionInfo"/>.

@@ -185,6 +185,8 @@ namespace Renci.SshNet.Tests.Classes
 
             public IChannelDirectTcpip CreateChannelDirectTcpip() => throw new NotImplementedException();
 
+            public IChannelDirectTcpip CreateChannelDirectTcpip(uint localWindowSize) => throw new NotImplementedException();
+
             public IChannelForwardedTcpip CreateChannelForwardedTcpip(uint remoteChannelNumber, uint remoteWindowSize, uint remoteChannelDataPacketSize)
                 => throw new NotImplementedException();
 

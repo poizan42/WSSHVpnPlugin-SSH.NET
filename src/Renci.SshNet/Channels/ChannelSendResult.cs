@@ -3,7 +3,7 @@
     /// <summary>
     /// The outcome of a non-blocking send on a channel.
     /// </summary>
-    internal enum ChannelSendResult
+    public enum ChannelSendResult
     {
         /// <summary>
         /// All of the data was sent.

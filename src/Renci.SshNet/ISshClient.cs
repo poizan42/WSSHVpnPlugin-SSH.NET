@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -242,5 +242,24 @@ namespace Renci.SshNet
         /// </returns>
         /// <exception cref="SshConnectionException">Client is not connected.</exception>
         public ShellStream CreateShellStreamNoTerminal(int bufferSize = -1);
+
+        /// <summary>
+        /// Opens a direct-tcpip channel to the given host and port, and returns it as a byte stream.
+        /// </summary>
+        /// <param name="host">The host to connect to on the far side.</param>
+        /// <param name="port">The port to connect to on the far side.</param>
+        /// <param name="bufferSize">The size of the receive buffer. Must be at least <paramref name="windowSize"/>.</param>
+        /// <param name="windowSize">
+        /// The initial size of the local window, which is how much the remote party may send before
+        /// the consumer has to release what it has taken.
+        /// </param>
+        /// <returns>The stream.</returns>
+        /// <remarks>
+        /// Unlike a forwarded port, nothing is listening locally and no socket is involved: the
+        /// caller owns the bytes in both directions. The window defaults to a small value rather than
+        /// the session default, because the point of this shape is that the window is real
+        /// backpressure.
+        /// </remarks>
+        public DirectTcpipStream CreateDirectTcpipStream(string host, uint port, int bufferSize = 65536, uint windowSize = 8192);
     }
 }

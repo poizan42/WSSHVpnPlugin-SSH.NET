@@ -2249,6 +2249,18 @@ namespace Renci.SshNet
         }
 
         /// <summary>
+        /// Create a new channel for a locally forwarded TCP/IP port, with a specific window size.
+        /// </summary>
+        /// <param name="localWindowSize">The initial size of the local window.</param>
+        /// <returns>
+        /// A new channel for a locally forwarded TCP/IP port.
+        /// </returns>
+        IChannelDirectTcpip ISession.CreateChannelDirectTcpip(uint localWindowSize)
+        {
+            return new ChannelDirectTcpip(this, NextChannelNumber, localWindowSize, LocalChannelDataPacketSize);
+        }
+
+        /// <summary>
         /// Creates a "forwarded-tcpip" SSH channel.
         /// </summary>
         /// <param name="remoteChannelNumber">The number of the remote channel.</param>

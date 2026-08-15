@@ -137,6 +137,17 @@ namespace Renci.SshNet
         ShellStream CreateShellStreamNoTerminal(ISession session, int bufferSize);
 
         /// <summary>
+        /// Creates a <see cref="DirectTcpipStream"/> carried by a newly opened direct-tcpip channel.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="host">The host to connect to on the far side.</param>
+        /// <param name="port">The port to connect to on the far side.</param>
+        /// <param name="bufferSize">The size of the receive buffer.</param>
+        /// <param name="windowSize">The initial size of the local window.</param>
+        /// <returns>The stream.</returns>
+        DirectTcpipStream CreateDirectTcpipStream(ISession session, string host, uint port, int bufferSize, uint windowSize);
+
+        /// <summary>
         /// Creates an <see cref="IConnector"/> that can be used to establish a connection
         /// to the server identified by the specified <paramref name="connectionInfo"/>.
         /// </summary>
