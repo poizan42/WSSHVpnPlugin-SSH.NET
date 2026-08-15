@@ -211,8 +211,12 @@ namespace Renci.SshNet.Tests.Classes.Channels
             }
         }
 
+        /// <summary>
+        /// Credit is batched until whichever comes first: half the window, or three packets' worth.
+        /// Here the window is 1000 and the packet size 100, so three packets - 300 - comes first.
+        /// </summary>
         [TestMethod]
-        public void DeferWindowCredit_CreditIsBatchedUntilHalfTheWindowAndThenFlushed()
+        public void DeferWindowCredit_CreditIsBatchedUntilThreePacketsAndThenFlushed()
         {
             using (var channel = CreateOpenChannel(remoteWindowSize: 1000))
             {
@@ -222,12 +226,11 @@ namespace Renci.SshNet.Tests.Classes.Channels
                                    new MessageEventArgs<ChannelDataMessage>(
                                        new ChannelDataMessage(_localChannelNumber, Payload(900))));
 
-                // Below half the window: nothing due yet.
+                // Below three packets: nothing due yet.
                 Assert.IsFalse(channel.ReleaseReceivedData(100));
-                Assert.IsFalse(channel.ReleaseReceivedData(200));
 
-                // Crossing half the window: a flush is due.
-                Assert.IsTrue(channel.ReleaseReceivedData(300));
+                // Reaching three packets: a flush is due, well before half the window.
+                Assert.IsTrue(channel.ReleaseReceivedData(200));
 
                 // Recording never sends by itself; sending blocks during a key exchange, and the
                 // consumer's thread must not inherit that.
@@ -236,8 +239,36 @@ namespace Renci.SshNet.Tests.Classes.Channels
                 channel.FlushWindowCredit();
 
                 var adjust = _sent.OfType<ChannelWindowAdjustMessage>().Single();
-                Assert.AreEqual(600u, adjust.BytesToAdd);
-                Assert.AreEqual(_localWindowSize - 900 + 600, channel.LocalWindowSize);
+                Assert.AreEqual(300u, adjust.BytesToAdd);
+                Assert.AreEqual(_localWindowSize - 900 + 300, channel.LocalWindowSize);
+            }
+        }
+
+        /// <summary>
+        /// The other arm: when the window is small relative to the packet size, half the window is
+        /// what triggers the flush. Without this the batching would never fire on such a channel.
+        /// </summary>
+        [TestMethod]
+        public void DeferWindowCredit_OnASmallWindow_FlushesAtHalfOfIt()
+        {
+            _localWindowSize = 400;
+            _localPacketSize = 1000;
+
+            using (var channel = CreateOpenChannel(remoteWindowSize: 1000))
+            {
+                channel.DeferWindowCredit = true;
+
+                _sessionMock.Raise(p => p.ChannelDataReceived += null,
+                                   new MessageEventArgs<ChannelDataMessage>(
+                                       new ChannelDataMessage(_localChannelNumber, Payload(300))));
+
+                Assert.IsFalse(channel.ReleaseReceivedData(100));
+                Assert.IsTrue(channel.ReleaseReceivedData(100), "half of 400 is due before three packets of 1000");
+
+                channel.FlushWindowCredit();
+
+                var adjust = _sent.OfType<ChannelWindowAdjustMessage>().Single();
+                Assert.AreEqual(200u, adjust.BytesToAdd);
             }
         }
 

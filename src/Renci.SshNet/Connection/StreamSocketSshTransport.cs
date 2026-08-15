@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -49,7 +50,19 @@ namespace Renci.SshNet.Connection
         private StreamSocketSshTransport(StreamSocket socket, ILoggerFactory loggerFactory)
         {
             _socket = socket;
-            _input = socket.InputStream.AsStreamForRead(bufferSize: 0);
+            // The read side is buffered and the write side is not, and the asymmetry is deliberate.
+            //
+            // Unbuffered writes: the session frames and batches its own packets, and a buffered
+            // writer would sit on an outgoing packet until something flushed it.
+            //
+            // Buffered reads: the adapter then posts reads of the buffer size against the socket,
+            // rather than whatever modest length the session asked for. That matters because the
+            // operating system's receive-window auto-tuning only opens the underlying TCP window as
+            // wide as the reader shows it can absorb - measured with unbuffered reads, the whole
+            // tunnel plateaued at the classic 64 KB-window ceiling (about 1.2 MB/s over a 48 ms
+            // round trip; 40 reads/s of ~30 KB each, every read spending its whole life waiting for
+            // bytes to arrive) while a native socket over the same link ran 30x faster.
+            _input = socket.InputStream.AsStreamForRead(bufferSize: 1024 * 1024);
             _output = socket.OutputStream.AsStreamForWrite(bufferSize: 0);
             _logger = loggerFactory.CreateLogger<StreamSocketSshTransport>();
             _isConnected = true;
@@ -156,6 +169,24 @@ namespace Renci.SshNet.Connection
             }
         }
 
+        /// <summary>
+        /// Gets how many reads have been issued against the socket, and how many bytes and
+        /// microseconds they took.
+        /// </summary>
+        /// <remarks>
+        /// Diagnostics for a throughput investigation. Each read is a separate WinRT operation that
+        /// this thread blocks on, so the interesting question is how many of them a given data rate
+        /// costs and how long each takes - a small average size with a large per-read cost is the
+        /// signature of the transport being the limit rather than anything above it.
+        /// </remarks>
+        public static long ReadCount;
+
+        /// <summary>Bytes returned by those reads.</summary>
+        public static long BytesRead;
+
+        /// <summary>Ticks spent inside those reads.</summary>
+        public static long ReadTicks;
+
         /// <inheritdoc/>
         public override int Read(byte[] buffer, int offset, int count, TimeSpan timeout)
         {
@@ -166,7 +197,14 @@ namespace Renci.SshNet.Connection
 
             if (timeout == Timeout.InfiniteTimeSpan)
             {
-                return Complete(() => _input.Read(buffer, offset, count));
+                var started = Stopwatch.GetTimestamp();
+                var read = Complete(() => _input.Read(buffer, offset, count));
+
+                _ = Interlocked.Increment(ref ReadCount);
+                _ = Interlocked.Add(ref BytesRead, read);
+                _ = Interlocked.Add(ref ReadTicks, Stopwatch.GetTimestamp() - started);
+
+                return read;
             }
 
             using (var cts = new CancellationTokenSource(timeout))

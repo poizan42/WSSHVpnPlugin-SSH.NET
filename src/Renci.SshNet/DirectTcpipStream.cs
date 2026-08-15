@@ -34,7 +34,8 @@ namespace Renci.SshNet
     {
         private readonly ChannelDirectTcpip _channel;
         private readonly Lock _readLock = new Lock();
-        private readonly byte[] _received;
+        private readonly int _maximumBufferSize;
+        private byte[] _received;
 
         private int _start;
         private int _end;
@@ -42,10 +43,23 @@ namespace Renci.SshNet
         private bool _peerClosed;
         private int _disposed;
 
+        /// <summary>
+        /// How much of the receive buffer is allocated before any data arrives.
+        /// </summary>
+        /// <remarks>
+        /// The buffer grows to <c>bufferSize</c> as it is actually needed, rather than being taken
+        /// in full up front. That matters when a channel is opened per connection: a large window is
+        /// what makes a long round trip fast, but paying for it on every idle channel is what makes
+        /// it unaffordable. OpenSSH sizes its channel buffers the same way, growing on demand while
+        /// advertising a window far larger than most channels ever use.
+        /// </remarks>
+        private const int InitialBufferSize = 16 * 1024;
+
         internal DirectTcpipStream(ChannelDirectTcpip channel, int bufferSize)
         {
             _channel = channel;
-            _received = new byte[bufferSize];
+            _maximumBufferSize = bufferSize;
+            _received = new byte[Math.Min(InitialBufferSize, bufferSize)];
 
             // The consumer decides when the remote party may send more, which is the whole point of
             // choosing a window smaller than the receive buffer.
@@ -93,6 +107,31 @@ namespace Renci.SshNet
         public bool IsOpen
         {
             get { return _channel.IsOpen; }
+        }
+
+        /// <summary>
+        /// Gets the window the remote party granted when the channel opened, and how much of it is
+        /// still free.
+        /// </summary>
+        /// <value>
+        /// The number of bytes that may still be sent before waiting for an adjustment.
+        /// </value>
+        /// <remarks>
+        /// Exposed for diagnostics. It is what the far end will accept from us, and is the mirror of
+        /// the window this side advertises - the pair of them set the throughput a channel can reach
+        /// over a given round trip.
+        /// </remarks>
+        public uint RemoteWindowSize
+        {
+            get { return _channel.RemoteWindowSize; }
+        }
+
+        /// <summary>
+        /// Gets the largest data payload the remote party will accept in one message.
+        /// </summary>
+        public uint RemotePacketSize
+        {
+            get { return _channel.RemotePacketSize; }
         }
 
         /// <summary>
@@ -271,7 +310,12 @@ namespace Renci.SshNet
 
                 if (_received.Length - _end < count)
                 {
-                    // Only reachable if the buffer is smaller than the window we advertised, which
+                    Grow(count);
+                }
+
+                if (_received.Length - _end < count)
+                {
+                    // Only reachable if the buffer cannot reach the window we advertised, which
                     // is a configuration error rather than a runtime condition: the remote party is
                     // entitled to send everything the window allows.
                     throw new SshException(string.Format(
@@ -286,6 +330,45 @@ namespace Renci.SshNet
             }
 
             DataAvailable?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Enlarges the receive buffer, up to the maximum the window needs.
+        /// </summary>
+        /// <param name="needed">How many bytes have to fit beyond what is already held.</param>
+        /// <remarks>
+        /// Called on the message listener thread, under the read lock, after compacting has failed
+        /// to make room. Any segment a consumer is holding from <c>TryRead</c> stays valid: it refers
+        /// to the old array, whose contents are copied rather than altered, and consumers read before
+        /// they <c>Advance</c>.
+        /// </remarks>
+        private void Grow(int needed)
+        {
+            var held = _end - _start;
+            var required = held + needed;
+
+            if (required > _maximumBufferSize)
+            {
+                return;
+            }
+
+            var capacity = _received.Length;
+
+            while (capacity < required)
+            {
+                capacity = Math.Min(capacity * 2, _maximumBufferSize);
+            }
+
+            var bigger = new byte[capacity];
+
+            if (held > 0)
+            {
+                Buffer.BlockCopy(_received, _start, bigger, 0, held);
+            }
+
+            _received = bigger;
+            _start = 0;
+            _end = held;
         }
 
         private void Compact()

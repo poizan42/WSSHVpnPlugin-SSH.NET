@@ -956,9 +956,13 @@ namespace Renci.SshNet.Channels
             {
                 _uncreditedBytes += (uint)count;
 
-                // Half the window is the usual compromise: often enough that the remote party is not
-                // stalled waiting for room, rare enough that it is not a message per read.
-                return _uncreditedBytes >= _initialWindowSize / 2;
+                // Whichever comes first, half the window or three packets' worth. OpenSSH's
+                // channel_check_window uses the same pair, and the second condition is what matters
+                // once the window is large: crediting only at half of a 2 MiB window would leave the
+                // remote party stalled for a round trip every megabyte, while three packets keeps
+                // the window near full without sending a message per read.
+                var threshold = Math.Min(_initialWindowSize / 2, LocalPacketSize * 3);
+                return _uncreditedBytes >= threshold;
             }
         }
 
