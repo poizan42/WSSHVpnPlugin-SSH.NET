@@ -1,6 +1,7 @@
 using System;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Microsoft.Extensions.Logging;
 
@@ -24,6 +25,13 @@ namespace Renci.SshNet.Channels
         private readonly ILogger _logger;
         private EventWaitHandle _channelClosedWaitHandle = new ManualResetEvent(initialState: false);
         private EventWaitHandle _channelServerWindowAdjustWaitHandle = new ManualResetEvent(initialState: false);
+
+        /// <summary>
+        /// Completes when the server's SSH_MSG_CHANNEL_CLOSE arrives, or when the session dies and
+        /// it never will. The asynchronous mirror of <see cref="_channelClosedWaitHandle"/>: a wait
+        /// on the handle parks a thread, and the whole point of <see cref="CloseAsync"/> is not to.
+        /// </summary>
+        private readonly TaskCompletionSource<bool> _channelClosedCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private uint? _remoteWindowSize;
         private uint? _remoteChannelNumber;
         private uint? _remotePacketSize;
@@ -537,6 +545,8 @@ namespace Renci.SshNet.Channels
                 _ = channelClosedWaitHandle.Set();
             }
 
+            _ = _channelClosedCompletion.TrySetResult(true);
+
             // close the channel
             Close();
         }
@@ -639,9 +649,73 @@ namespace Renci.SshNet.Channels
         /// </summary>
         protected virtual void Close()
         {
+            if (TrySendCloseSequence())
+            {
+                // Only wait for the channel to be closed by the server if we didn't send a
+                // SSH_MSG_CHANNEL_CLOSE as response to a SSH_MSG_CHANNEL_CLOSE sent by the server.
+                // (When we did, the handle is already set and the wait returns immediately.)
+                var channelClosedWaitHandle = _channelClosedWaitHandle;
+                if (channelClosedWaitHandle is not null)
+                {
+                    var closeWaitResult = _session.TryWait(channelClosedWaitHandle, ConnectionInfo.ChannelCloseTimeout);
+                    if (closeWaitResult != WaitResult.Success)
+                    {
+                        _logger.LogInformation("Wait for channel close not successful: {CloseWaitResult}", closeWaitResult);
+                    }
+                }
+            }
+
+            CompleteClose();
+        }
+
+        /// <summary>
+        /// Closes the channel without ever parking a thread: the wait for the server's
+        /// SSH_MSG_CHANNEL_CLOSE costs an object, not a blocked thread.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A task that represents the close.</returns>
+        /// <remarks>
+        /// The bookkeeping in <see cref="CompleteClose"/> runs on every exit path, including timeout
+        /// and cancellation. Without that, a later <see cref="Dispose()"/> would find the channel
+        /// still marked open and re-enter the blocking <see cref="Close"/> path, and nothing would
+        /// have been gained.
+        /// </remarks>
+        public virtual async Task CloseAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (TrySendCloseSequence())
+                {
+                    try
+                    {
+                        _ = await _channelClosedCompletion.Task
+                            .WaitAsync(ConnectionInfo.ChannelCloseTimeout, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        _logger.LogInformation("Wait for channel close not successful: TimedOut");
+                    }
+                }
+            }
+            finally
+            {
+                CompleteClose();
+            }
+        }
+
+        /// <summary>
+        /// Sends the EOF-then-CLOSE sequence, if this side still owes it.
+        /// </summary>
+        /// <returns>
+        /// <see langword="true"/> if a SSH_MSG_CHANNEL_CLOSE was sent just now, so the caller should
+        /// wait for the server's; otherwise, <see langword="false"/>.
+        /// </returns>
+        private bool TrySendCloseSequence()
+        {
             /*
              * Synchronize sending SSH_MSG_CHANNEL_EOF and SSH_MSG_CHANNEL_CLOSE to ensure that these messages
-             * are sent in that other; when both the client and the server attempt to close the channel at the
+             * are sent in that order; when both the client and the server attempt to close the channel at the
              * same time we would otherwise risk sending the SSH_MSG_CHANNEL_EOF after the SSH_MSG_CHANNEL_CLOSE
              * message causing the server to disconnect the session.
              */
@@ -669,18 +743,21 @@ namespace Renci.SshNet.Channels
                     if (TrySendMessage(new ChannelCloseMessage(RemoteChannelNumber)))
                     {
                         _closeMessageSent = true;
-
-                        // only wait for the channel to be closed by the server if we didn't send a
-                        // SSH_MSG_CHANNEL_CLOSE as response to a SSH_MSG_CHANNEL_CLOSE sent by the
-                        // server
-                        var closeWaitResult = _session.TryWait(_channelClosedWaitHandle, ConnectionInfo.ChannelCloseTimeout);
-                        if (closeWaitResult != WaitResult.Success)
-                        {
-                            _logger.LogInformation("Wait for channel close not successful: {CloseWaitResult}", closeWaitResult);
-                        }
+                        return true;
                     }
                 }
 
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Marks the channel closed and raises <see cref="Closed"/> when both sides have closed.
+        /// </summary>
+        private void CompleteClose()
+        {
+            lock (_messagingLock)
+            {
                 if (IsOpen)
                 {
                     // mark sure the channel is marked closed before we raise the Closed event
@@ -708,6 +785,11 @@ namespace Renci.SshNet.Channels
         {
             IsOpen = false;
 
+            // The server's close is never coming; a CloseAsync in flight must not wait for it. The
+            // synchronous path survives this only because Session.TryWait also watches the session's
+            // own demise - this is the asynchronous equivalent.
+            _ = _channelClosedCompletion.TrySetResult(false);
+
             try
             {
                 OnDisconnected();
@@ -734,6 +816,8 @@ namespace Renci.SshNet.Channels
 
         private void Session_ErrorOccurred(object sender, ExceptionEventArgs e)
         {
+            _ = _channelClosedCompletion.TrySetResult(false);
+
             try
             {
                 OnErrorOccurred(e.Exception);
