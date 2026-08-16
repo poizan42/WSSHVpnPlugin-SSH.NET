@@ -178,6 +178,25 @@ namespace Renci.SshNet.Tests.Classes.Channels
         /// task never completes, and a caller opening a channel per flow accumulates them silently
         /// whenever the connection drops.
         /// </remarks>
+        /// <summary>
+        /// A refusal is the server's verdict about the destination, and a caller opening channels
+        /// per connection caches it - so the exception has to say that it is one, and about what.
+        /// </summary>
+        [TestMethod]
+        public async Task OpenAsync_ServerRefuses_TheExceptionCarriesTheVerdict()
+        {
+            RespondToOpenWith(RefuseOpen);
+
+            using (var channel = CreateChannel())
+            {
+                var ex = await Assert.ThrowsAsync<SshChannelOpenException>(
+                    () => channel.OpenAsync(_remoteHost, _port, _originatorAddress, _originatorPort, CancellationToken.None));
+
+                Assert.AreEqual(SshChannelOpenException.AdministrativelyProhibited, ex.ReasonCode);
+                Assert.IsTrue(ex.IsAboutTheDestination);
+            }
+        }
+
         [TestMethod]
         public async Task OpenAsync_SessionDisconnects_Throws()
         {

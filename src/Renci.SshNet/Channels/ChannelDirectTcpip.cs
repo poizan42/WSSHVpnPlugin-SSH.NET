@@ -173,13 +173,15 @@ namespace Renci.SshNet.Channels
             }
         }
 
-        private SshException CreateOpenFailedException()
+        private SshChannelOpenException CreateOpenFailedException()
         {
-            return new SshException(string.Format(
-                System.Globalization.CultureInfo.InvariantCulture,
-                "The server refused to open the channel: {0} (reason {1}).",
-                _openFailureDescription ?? "no description given",
-                _openFailureReason));
+            return new SshChannelOpenException(
+                string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "The server refused to open the channel: {0} (reason {1}).",
+                    _openFailureDescription ?? "no description given",
+                    _openFailureReason),
+                _openFailureReason);
         }
 
         /// <summary>
