@@ -258,8 +258,9 @@ namespace Renci.SshNet
         /// </returns>
         /// <remarks>
         /// The segment points into this stream's own buffer. It stays valid until
-        /// <see cref="Advance"/> releases it, which is what lets a caller retransmit from it rather
-        /// than keeping a copy of its own.
+        /// <see cref="Advance"/> releases it or <see cref="FlushWindowCredit"/> reclaims the
+        /// released space, which is what lets a caller retransmit from it rather than keeping a
+        /// copy of its own.
         /// </remarks>
         public bool TryRead(out ArraySegment<byte> data)
         {
@@ -322,10 +323,26 @@ namespace Renci.SshNet
         /// Credits the remote party for the bytes released by <see cref="Advance"/>.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// Blocks for the duration of a key exchange, like any send.
+        /// </para>
+        /// <para>
+        /// This is also where released buffer space is reclaimed, and the coupling is not a
+        /// convenience: the space released at the front of the buffer is exactly what covers the
+        /// bytes the credit permits the remote party to send. Crediting without compacting lets
+        /// the window outrun the free space at the tail; compacting anywhere else races a consumer
+        /// reading a peeked segment. Here it does neither - this runs on the consumer's own
+        /// thread, and calling it invalidates any segment previously returned by
+        /// <see cref="TryRead"/>, the same way <see cref="Advance"/> does.
+        /// </para>
         /// </remarks>
         public void FlushWindowCredit()
         {
+            lock (_readLock)
+            {
+                Compact();
+            }
+
             _channel.FlushWindowCredit();
         }
 
@@ -418,12 +435,14 @@ namespace Renci.SshNet
 
                 if (_received.Length - _end < count)
                 {
-                    // Reclaim the space already released before giving up on it.
-                    Compact();
-                }
-
-                if (_received.Length - _end < count)
-                {
+                    // Never compacted in place from here: this runs on the message listener thread,
+                    // and a consumer may be reading a segment it peeked with TryRead - an
+                    // overlapping copy under its feet tears the bytes it is sending. Torn bytes are
+                    // not an error anywhere on this side; they surface as the far end resetting a
+                    // perfectly healthy connection, because TLS notices before anything else can.
+                    // Grow copies into a fresh array, which the held segment does not point into,
+                    // and space is otherwise reclaimed on the consumer's own thread in
+                    // FlushWindowCredit.
                     Grow(count);
                 }
 
@@ -451,10 +470,11 @@ namespace Renci.SshNet
         /// </summary>
         /// <param name="needed">How many bytes have to fit beyond what is already held.</param>
         /// <remarks>
-        /// Called on the message listener thread, under the read lock, after compacting has failed
-        /// to make room. Any segment a consumer is holding from <c>TryRead</c> stays valid: it refers
-        /// to the old array, whose contents are copied rather than altered, and consumers read before
-        /// they <c>Advance</c>.
+        /// Called on the message listener thread, under the read lock. Any segment a consumer is
+        /// holding from <c>TryRead</c> stays valid: it refers to the old array, whose contents are
+        /// copied rather than altered. At full capacity this degenerates into an out-of-place
+        /// compaction - a fresh same-sized array - which is the safe (if allocating) fallback when
+        /// space has been released but not yet reclaimed by <c>FlushWindowCredit</c>.
         /// </remarks>
         private void Grow(int needed)
         {
