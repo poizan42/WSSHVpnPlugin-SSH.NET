@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 
 using Renci.SshNet.Common;
 
+#nullable enable
 namespace Renci.SshNet.Connection
 {
     /// <summary>

@@ -299,6 +299,14 @@ namespace Renci.SshNet
             return ServiceFactory.CreateDirectTcpipStream(Session, host, port, bufferSize, windowSize);
         }
 
+        /// <inheritdoc />
+        public DirectTcpipStream CreateUnopenedDirectTcpipStream(int bufferSize = 65536, uint windowSize = 8192)
+        {
+            EnsureSessionIsOpen();
+
+            return ServiceFactory.CreateUnopenedDirectTcpipStream(Session, bufferSize, windowSize);
+        }
+
         /// <summary>
         /// Stops forwarded ports.
         /// </summary>

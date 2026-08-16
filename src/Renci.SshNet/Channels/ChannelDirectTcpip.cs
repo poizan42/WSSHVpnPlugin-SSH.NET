@@ -19,6 +19,16 @@ namespace Renci.SshNet.Channels
     {
         private readonly Lock _socketLock = new Lock();
         private readonly ILogger _logger;
+
+        /// <summary>
+        /// Completes when the open has <em>settled</em> - confirmed, refused, or overtaken by the
+        /// session's death. Distinct from <see cref="_openCompletion"/>, which is the caller's wait
+        /// and can be cancelled: cancellation means the caller stopped waiting, never that the
+        /// channel is gone. This one is never cancelled, because the server still owes an answer,
+        /// and <see cref="AbandonAsync"/> holds the channel subscribed until it arrives.
+        /// </summary>
+        private readonly TaskCompletionSource<bool> _openSettled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
         private EventWaitHandle _channelOpen = new AutoResetEvent(initialState: false);
         private EventWaitHandle _channelData = new AutoResetEvent(initialState: false);
         private IForwardedPort _forwardedPort;
@@ -147,10 +157,20 @@ namespace Renci.SshNet.Channels
 
         private void SendChannelOpen(string remoteHost, uint port, string originatorAddress, uint originatorPort)
         {
-            SendMessage(new ChannelOpenMessage(LocalChannelNumber,
-                                               LocalWindowSize,
-                                               LocalPacketSize,
-                                               new DirectTcpipChannelInfo(remoteHost, port, originatorAddress, originatorPort)));
+            try
+            {
+                SendMessage(new ChannelOpenMessage(LocalChannelNumber,
+                                                   LocalWindowSize,
+                                                   LocalPacketSize,
+                                                   new DirectTcpipChannelInfo(remoteHost, port, originatorAddress, originatorPort)));
+            }
+            catch
+            {
+                // The open never went on the wire, so the server owes nothing and there is nothing
+                // to wait for. Without this an AbandonAsync after a failed send would wait forever.
+                _ = _openSettled.TrySetResult(false);
+                throw;
+            }
         }
 
         private SshException CreateOpenFailedException()
@@ -278,6 +298,66 @@ namespace Renci.SshNet.Channels
         }
 
         /// <summary>
+        /// Closes the channel without parking a thread. The mirror of <see cref="Close"/>, kept
+        /// beside it so the two cannot silently diverge.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A task that represents the close.</returns>
+        public override async Task CloseAsync(CancellationToken cancellationToken = default)
+        {
+            var forwardedPort = _forwardedPort;
+            if (forwardedPort != null)
+            {
+                forwardedPort.Closing -= ForwardedPort_Closing;
+                _forwardedPort = null;
+            }
+
+            // signal to the client that we will not send anything anymore; this will also interrupt the
+            // blocking receive in Bind if the client sends FIN/ACK in time
+            //
+            // if the FIN/ACK is not sent in time, the socket will be closed after the channel is closed
+            ShutdownSocket(SocketShutdown.Send);
+
+            // close the SSH channel
+            await base.CloseAsync(cancellationToken).ConfigureAwait(false);
+
+            // close the socket
+            CloseSocket();
+        }
+
+        /// <summary>
+        /// Walks away from an open whose answer the caller no longer wants, without leaking what the
+        /// server may still grant.
+        /// </summary>
+        /// <returns>A task that completes once the channel has been closed and disposed.</returns>
+        /// <remarks>
+        /// <para>
+        /// Disposing a channel whose open is still in flight is backwards: before confirmation there
+        /// is no remote channel number, so nothing goes on the wire, and disposing unsubscribes from
+        /// the confirmation - which, arriving late, then reaches nobody, and the server keeps the
+        /// channel and its TCP connection to the destination for the life of the session.
+        /// </para>
+        /// <para>
+        /// So this stays subscribed until the open settles - the server owes an answer, and
+        /// disconnection or session failure bounds the wait - then closes if it was confirmed and
+        /// disposes either way. Until then the abandoned open costs this object, which is the point:
+        /// an object, not a parked thread. For an unreachable destination the wait lasts as long as
+        /// the server's own connect timeout.
+        /// </para>
+        /// </remarks>
+        public async Task AbandonAsync()
+        {
+            _ = await _openSettled.Task.ConfigureAwait(false);
+
+            if (IsOpen)
+            {
+                await CloseAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            Dispose();
+        }
+
+        /// <summary>
         /// Called when channel data is received.
         /// </summary>
         /// <param name="data">The data.</param>
@@ -308,6 +388,7 @@ namespace Renci.SshNet.Channels
             base.OnOpenConfirmation(remoteChannelNumber, initialWindowSize, maximumPacketSize);
 
             _ = _channelOpen?.Set();
+            _ = _openSettled.TrySetResult(true);
             _ = _openCompletion?.TrySetResult(true);
         }
 
@@ -319,6 +400,7 @@ namespace Renci.SshNet.Channels
             _openFailureDescription = description;
 
             _ = _channelOpen?.Set();
+            _ = _openSettled.TrySetResult(false);
 
             // Completed rather than faulted: the caller is told by the IsOpen check, which keeps the
             // sync and async paths reporting a refusal the same way.
@@ -349,6 +431,7 @@ namespace Renci.SshNet.Channels
             base.OnErrorOccurred(exp);
 
             // An open in flight ends here too, not only at confirmation or failure.
+            _ = _openSettled.TrySetResult(false);
             _ = _openCompletion?.TrySetException(exp);
 
             // signal to the client that we will not send anything anymore; this will also interrupt the
@@ -369,6 +452,7 @@ namespace Renci.SshNet.Channels
         {
             base.OnDisconnected();
 
+            _ = _openSettled.TrySetResult(false);
             _ = _openCompletion?.TrySetException(
                 new SshConnectionException("The session was disconnected while the channel was being opened."));
 

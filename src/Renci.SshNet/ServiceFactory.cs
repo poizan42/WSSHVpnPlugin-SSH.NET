@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading.Tasks;
 
 using Renci.SshNet.Common;
 using Renci.SshNet.Connection;
@@ -144,18 +145,52 @@ namespace Renci.SshNet
         {
             var channel = (Channels.ChannelDirectTcpip)session.CreateChannelDirectTcpip(windowSize);
 
+            // The stream must exist - and be subscribed - before the open goes on the wire: data can
+            // arrive immediately behind the confirmation, and a subscription made afterwards races
+            // it and loses.
+            var stream = new DirectTcpipStream(channel, bufferSize);
+
             try
             {
                 // The originator endpoint is informational; the server may log it. There is no
                 // accepted connection behind this channel to take a real one from.
                 channel.Open(host, port, "127.0.0.1", 0);
 
-                return new DirectTcpipStream(channel, bufferSize);
+                return stream;
             }
             catch
             {
-                channel.Dispose();
+                // Abandoned rather than disposed: disposing an unsettled open unsubscribes from a
+                // confirmation that may still arrive, leaving the server holding the channel. The
+                // reap is fire-and-forget, but its exceptions are observed - an unobserved faulted
+                // task is a crash in some hosts.
+                AbandonSilently(stream);
                 throw;
+            }
+        }
+
+        /// <inheritdoc/>
+        public DirectTcpipStream CreateUnopenedDirectTcpipStream(ISession session, int bufferSize, uint windowSize)
+        {
+            var channel = (Channels.ChannelDirectTcpip)session.CreateChannelDirectTcpip(windowSize);
+
+            return new DirectTcpipStream(channel, bufferSize);
+        }
+
+        private static void AbandonSilently(DirectTcpipStream stream)
+        {
+            _ = ReapAsync(stream);
+
+            static async Task ReapAsync(DirectTcpipStream stream)
+            {
+                try
+                {
+                    await stream.AbandonAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Best effort: the session's own teardown reclaims anything the reap missed.
+                }
             }
         }
 

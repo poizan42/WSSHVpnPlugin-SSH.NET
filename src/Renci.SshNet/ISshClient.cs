@@ -261,5 +261,22 @@ namespace Renci.SshNet
         /// backpressure.
         /// </remarks>
         public DirectTcpipStream CreateDirectTcpipStream(string host, uint port, int bufferSize = 65536, uint windowSize = 8192);
+
+        /// <summary>
+        /// Creates a <see cref="DirectTcpipStream"/> over a channel that has not been opened yet.
+        /// </summary>
+        /// <param name="bufferSize">The size of the receive buffer. Must be at least <paramref name="windowSize"/>.</param>
+        /// <param name="windowSize">
+        /// The initial size of the local window, which is how much the remote party may send before
+        /// the consumer has to release what it has taken.
+        /// </param>
+        /// <returns>The stream, ready for <see cref="DirectTcpipStream.OpenAsync"/>.</returns>
+        /// <remarks>
+        /// The two-step shape exists for callers that open many channels concurrently and cannot
+        /// afford to park a thread per open: the open is awaited, a caller that stops waiting hands
+        /// the stream to <see cref="DirectTcpipStream.AbandonAsync"/>, and the abandoned open then
+        /// costs an object until the server answers rather than a blocked thread.
+        /// </remarks>
+        public DirectTcpipStream CreateUnopenedDirectTcpipStream(int bufferSize = 65536, uint windowSize = 8192);
     }
 }

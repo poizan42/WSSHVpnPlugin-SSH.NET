@@ -38,6 +38,10 @@ namespace Renci.SshNet.Connection
     /// </remarks>
     public sealed class StreamSocketSshTransport : SshTransport
     {
+        private static long _readCount;
+        private static long _bytesRead;
+        private static long _readTicks;
+
         private readonly StreamSocket _socket;
         private readonly Stream _input;
         private readonly Stream _output;
@@ -50,6 +54,7 @@ namespace Renci.SshNet.Connection
         private StreamSocketSshTransport(StreamSocket socket, ILoggerFactory loggerFactory)
         {
             _socket = socket;
+
             // The read side is buffered and the write side is not, and the asymmetry is deliberate.
             //
             // Unbuffered writes: the session frames and batches its own packets, and a buffered
@@ -170,8 +175,7 @@ namespace Renci.SshNet.Connection
         }
 
         /// <summary>
-        /// Gets how many reads have been issued against the socket, and how many bytes and
-        /// microseconds they took.
+        /// Gets how many reads have been issued against the socket.
         /// </summary>
         /// <remarks>
         /// Diagnostics for a throughput investigation. Each read is a separate WinRT operation that
@@ -179,13 +183,22 @@ namespace Renci.SshNet.Connection
         /// costs and how long each takes - a small average size with a large per-read cost is the
         /// signature of the transport being the limit rather than anything above it.
         /// </remarks>
-        public static long ReadCount;
+        public static long ReadCount
+        {
+            get { return Interlocked.Read(ref _readCount); }
+        }
 
-        /// <summary>Bytes returned by those reads.</summary>
-        public static long BytesRead;
+        /// <summary>Gets how many bytes those reads returned.</summary>
+        public static long BytesRead
+        {
+            get { return Interlocked.Read(ref _bytesRead); }
+        }
 
-        /// <summary>Ticks spent inside those reads.</summary>
-        public static long ReadTicks;
+        /// <summary>Gets how many ticks were spent inside those reads.</summary>
+        public static long ReadTicks
+        {
+            get { return Interlocked.Read(ref _readTicks); }
+        }
 
         /// <inheritdoc/>
         public override int Read(byte[] buffer, int offset, int count, TimeSpan timeout)
@@ -200,9 +213,9 @@ namespace Renci.SshNet.Connection
                 var started = Stopwatch.GetTimestamp();
                 var read = Complete(() => _input.Read(buffer, offset, count));
 
-                _ = Interlocked.Increment(ref ReadCount);
-                _ = Interlocked.Add(ref BytesRead, read);
-                _ = Interlocked.Add(ref ReadTicks, Stopwatch.GetTimestamp() - started);
+                _ = Interlocked.Increment(ref _readCount);
+                _ = Interlocked.Add(ref _bytesRead, read);
+                _ = Interlocked.Add(ref _readTicks, Stopwatch.GetTimestamp() - started);
 
                 return read;
             }

@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Renci.SshNet.Channels;
 using Renci.SshNet.Common;
@@ -30,19 +31,8 @@ namespace Renci.SshNet
         "Naming",
         "CA1711:Identifiers should not have incorrect suffix",
         Justification = "It is a stream of bytes over a channel; it deliberately does not derive from Stream, for the reasons in the remarks.")]
-    public sealed class DirectTcpipStream : IDisposable
+    public sealed class DirectTcpipStream : IDisposable, IAsyncDisposable
     {
-        private readonly ChannelDirectTcpip _channel;
-        private readonly Lock _readLock = new Lock();
-        private readonly int _maximumBufferSize;
-        private byte[] _received;
-
-        private int _start;
-        private int _end;
-        private bool _peerEof;
-        private bool _peerClosed;
-        private int _disposed;
-
         /// <summary>
         /// How much of the receive buffer is allocated before any data arrives.
         /// </summary>
@@ -54,6 +44,20 @@ namespace Renci.SshNet
         /// advertising a window far larger than most channels ever use.
         /// </remarks>
         private const int InitialBufferSize = 16 * 1024;
+
+        private static long _windowAdjustsSent;
+        private static long _windowBytesCredited;
+
+        private readonly ChannelDirectTcpip _channel;
+        private readonly Lock _readLock = new Lock();
+        private readonly int _maximumBufferSize;
+        private byte[] _received;
+
+        private int _start;
+        private int _end;
+        private bool _peerEof;
+        private bool _peerClosed;
+        private int _disposed;
 
         internal DirectTcpipStream(ChannelDirectTcpip channel, int bufferSize)
         {
@@ -109,17 +113,33 @@ namespace Renci.SshNet
             get { return _channel.IsOpen; }
         }
 
-        /// <summary>How many window adjustments deferred crediting has sent, across all channels.</summary>
+        /// <summary>Gets how many window adjustments deferred crediting has sent, across all channels.</summary>
         /// <remarks>
         /// Diagnostics for a throughput investigation: roughly 55 KB stays in flight per round trip
         /// however large the granted window, which is the signature of a sender waiting on credit.
         /// Whether credit actually flows - and in what sizes - is exactly what these observe. They
         /// live here rather than on the channel because the channel type is internal.
         /// </remarks>
-        public static long WindowAdjustsSent;
+        public static long WindowAdjustsSent
+        {
+            get { return Interlocked.Read(ref _windowAdjustsSent); }
+        }
 
-        /// <summary>How many bytes those adjustments credited.</summary>
-        public static long WindowBytesCredited;
+        /// <summary>Gets how many bytes those adjustments credited.</summary>
+        public static long WindowBytesCredited
+        {
+            get { return Interlocked.Read(ref _windowBytesCredited); }
+        }
+
+        /// <summary>
+        /// Counts one window adjustment and the bytes it credited.
+        /// </summary>
+        /// <param name="credited">The number of bytes the adjustment credited.</param>
+        internal static void CountWindowCredit(uint credited)
+        {
+            _ = Interlocked.Increment(ref _windowAdjustsSent);
+            _ = Interlocked.Add(ref _windowBytesCredited, credited);
+        }
 
         /// <summary>
         /// Gets the window the remote party granted when the channel opened, and how much of it is
@@ -178,6 +198,55 @@ namespace Renci.SshNet
                     return _peerEof;
                 }
             }
+        }
+
+        /// <summary>
+        /// Opens the channel this stream was created over.
+        /// </summary>
+        /// <param name="host">The name or address of the remote host to forward to.</param>
+        /// <param name="port">The port of the remote host to forward to.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A task that represents the open.</returns>
+        /// <exception cref="SshException">The server refused the channel, or the session failed while the open was outstanding.</exception>
+        /// <remarks>
+        /// <para>
+        /// The stream subscribes to the channel in its constructor, before this is called, so data
+        /// arriving immediately behind the confirmation lands in the buffer rather than being lost -
+        /// which is why opening is the stream's job and not something done to a bare channel first.
+        /// </para>
+        /// <para>
+        /// Cancellation means the caller stopped waiting, not that the channel is gone: the server
+        /// still owes an answer. A caller that cancels must hand the stream to
+        /// <see cref="AbandonAsync"/> rather than <see cref="Dispose"/>, or a confirmation arriving
+        /// late leaves the server holding the channel for the life of the session.
+        /// </para>
+        /// </remarks>
+        public Task OpenAsync(string host, uint port, CancellationToken cancellationToken)
+        {
+            // The originator endpoint is informational; the server may log it. There is no accepted
+            // connection behind this channel to take a real one from.
+            return _channel.OpenAsync(host, port, "127.0.0.1", 0, cancellationToken);
+        }
+
+        /// <summary>
+        /// Walks away from a stream whose open the caller no longer wants, without leaking what the
+        /// server may still grant.
+        /// </summary>
+        /// <returns>
+        /// A task that completes once the open has settled and the channel has been closed and
+        /// disposed. For an unreachable destination that is bounded by the server's own connect
+        /// timeout, so callers typically observe this task rather than await it inline.
+        /// </returns>
+        public Task AbandonAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            Unsubscribe();
+
+            return _channel.AbandonAsync();
         }
 
         /// <summary>
@@ -292,16 +361,49 @@ namespace Renci.SshNet
                 return;
             }
 
-            // Unsubscribed before disposing, and outside the read lock: the channel's close path
-            // waits on the message listener thread, and taking a lock a notification handler also
-            // takes would deadlock the two against each other.
+            Unsubscribe();
+
+            _channel.Dispose();
+        }
+
+        /// <summary>
+        /// Disposes the stream without parking a thread on the close handshake.
+        /// </summary>
+        /// <returns>A task that represents the disposal.</returns>
+        /// <remarks>
+        /// The close is driven through <see cref="ChannelDirectTcpip.CloseAsync"/> first, so the
+        /// <see cref="IDisposable.Dispose"/> the channel still needs afterwards finds the channel
+        /// already closed and has nothing left to wait on.
+        /// </remarks>
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            Unsubscribe();
+
+            await _channel.CloseAsync().ConfigureAwait(false);
+
+            _channel.Dispose();
+        }
+
+        /// <summary>
+        /// Detaches from the channel's notifications.
+        /// </summary>
+        /// <remarks>
+        /// Before disposing, and outside the read lock: the channel's close path waits on the
+        /// message listener thread, and taking a lock a notification handler also takes would
+        /// deadlock the two against each other.
+        /// </remarks>
+        private void Unsubscribe()
+        {
             _channel.DataReceived -= OnDataReceived;
             _channel.EndOfData -= OnEndOfData;
             _channel.Closed -= OnClosed;
             _channel.WindowAvailable -= OnWindowAvailable;
             _channel.Exception -= OnException;
-
-            _channel.Dispose();
         }
 
         /// <summary>

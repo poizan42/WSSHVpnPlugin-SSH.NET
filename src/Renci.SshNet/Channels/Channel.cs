@@ -23,8 +23,6 @@ namespace Renci.SshNet.Channels
         private readonly uint _initialWindowSize;
         private readonly ISession _session;
         private readonly ILogger _logger;
-        private EventWaitHandle _channelClosedWaitHandle = new ManualResetEvent(initialState: false);
-        private EventWaitHandle _channelServerWindowAdjustWaitHandle = new ManualResetEvent(initialState: false);
 
         /// <summary>
         /// Completes when the server's SSH_MSG_CHANNEL_CLOSE arrives, or when the session dies and
@@ -32,6 +30,9 @@ namespace Renci.SshNet.Channels
         /// on the handle parks a thread, and the whole point of <see cref="CloseAsync"/> is not to.
         /// </summary>
         private readonly TaskCompletionSource<bool> _channelClosedCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private EventWaitHandle _channelClosedWaitHandle = new ManualResetEvent(initialState: false);
+        private EventWaitHandle _channelServerWindowAdjustWaitHandle = new ManualResetEvent(initialState: false);
         private uint? _remoteWindowSize;
         private uint? _remoteChannelNumber;
         private uint? _remotePacketSize;
@@ -692,9 +693,9 @@ namespace Renci.SshNet.Channels
                             .WaitAsync(ConnectionInfo.ChannelCloseTimeout, cancellationToken)
                             .ConfigureAwait(false);
                     }
-                    catch (TimeoutException)
+                    catch (TimeoutException ex)
                     {
-                        _logger.LogInformation("Wait for channel close not successful: TimedOut");
+                        _logger.LogInformation(ex, "Wait for channel close not successful: TimedOut");
                     }
                 }
             }
@@ -1077,8 +1078,7 @@ namespace Renci.SshNet.Channels
             {
                 SendMessage(new ChannelWindowAdjustMessage(RemoteChannelNumber, credit));
 
-                _ = System.Threading.Interlocked.Increment(ref DirectTcpipStream.WindowAdjustsSent);
-                _ = System.Threading.Interlocked.Add(ref DirectTcpipStream.WindowBytesCredited, credit);
+                DirectTcpipStream.CountWindowCredit(credit);
             }
         }
 

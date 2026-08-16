@@ -148,6 +148,15 @@ namespace Renci.SshNet
         DirectTcpipStream CreateDirectTcpipStream(ISession session, string host, uint port, int bufferSize, uint windowSize);
 
         /// <summary>
+        /// Creates a <see cref="DirectTcpipStream"/> over a channel that has not been opened yet.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="bufferSize">The size of the receive buffer.</param>
+        /// <param name="windowSize">The initial size of the local window.</param>
+        /// <returns>The stream, ready for <see cref="DirectTcpipStream.OpenAsync"/>.</returns>
+        DirectTcpipStream CreateUnopenedDirectTcpipStream(ISession session, int bufferSize, uint windowSize);
+
+        /// <summary>
         /// Creates an <see cref="IConnector"/> that can be used to establish a connection
         /// to the server identified by the specified <paramref name="connectionInfo"/>.
         /// </summary>
