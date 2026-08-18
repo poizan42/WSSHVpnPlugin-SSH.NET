@@ -36,7 +36,13 @@ namespace Renci.SshNet.Channels
         private uint? _remoteWindowSize;
         private uint? _remoteChannelNumber;
         private uint? _remotePacketSize;
-        private bool _isDisposed;
+
+        /// <summary>
+        /// 0 until disposed. Interlocked, because disposal may arrive from a reaper worker while
+        /// another teardown path races it - the dispose body must run exactly once regardless of
+        /// thread.
+        /// </summary>
+        private int _isDisposed;
 
         /// <summary>
         /// Bytes the consumer has released that have not yet been credited to the remote party.
@@ -1150,7 +1156,7 @@ namespace Renci.SshNet.Channels
         /// <param name="disposing"><see langword="true"/> to release both managed and unmanaged resources; <see langword="false"/> to release only unmanaged resources.</param>
         protected virtual void Dispose(bool disposing)
         {
-            if (!_isDisposed && disposing)
+            if (disposing && Interlocked.Exchange(ref _isDisposed, 1) == 0)
             {
                 Close();
 
@@ -1182,8 +1188,6 @@ namespace Renci.SshNet.Channels
                     _channelServerWindowAdjustWaitHandle = null;
                     channelServerWindowAdjustWaitHandle.Dispose();
                 }
-
-                _isDisposed = true;
             }
         }
     }

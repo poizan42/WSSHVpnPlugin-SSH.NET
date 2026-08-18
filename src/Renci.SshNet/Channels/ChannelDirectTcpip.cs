@@ -30,7 +30,6 @@ namespace Renci.SshNet.Channels
         private readonly TaskCompletionSource<bool> _openSettled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private EventWaitHandle _channelOpen = new AutoResetEvent(initialState: false);
-        private EventWaitHandle _channelData = new AutoResetEvent(initialState: false);
         private IForwardedPort _forwardedPort;
         private Socket _socket;
         private TaskCompletionSource<bool> _openCompletion;
@@ -493,13 +492,6 @@ namespace Renci.SshNet.Channels
                 {
                     _channelOpen = null;
                     channelOpen.Dispose();
-                }
-
-                var channelData = _channelData;
-                if (channelData != null)
-                {
-                    _channelData = null;
-                    channelData.Dispose();
                 }
             }
         }
