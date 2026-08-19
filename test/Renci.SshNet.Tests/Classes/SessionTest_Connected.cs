@@ -9,6 +9,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using Moq;
 
+using Renci.SshNet.Common;
 using Renci.SshNet.Messages.Connection;
 using Renci.SshNet.Messages.Transport;
 using Renci.SshNet.Tests.Common;
@@ -358,6 +359,44 @@ namespace Renci.SshNet.Tests.Classes
         public void ConnectorOnConnectorShouldHaveBeenInvokedOnce()
         {
             ConnectorMock.Verify(p => p.Connect(ConnectionInfo), Times.Once());
+        }
+
+        /// <summary>
+        /// Sending after disposal is a connection error.
+        /// </summary>
+        /// <remarks>
+        /// This passes on the strength of the transport check at the top of
+        /// <c>SendMessage</c>, and deliberately does <em>not</em> cover the race that check cannot
+        /// catch — a send already past it when <c>Dispose</c> disposes the outbound cipher, which
+        /// used to throw <see cref="NullReferenceException"/> out of <c>BCryptEncrypt</c>. Verified
+        /// by disabling the in-lock guard: these two tests still pass. Reproducing the interleaving
+        /// needs a session over a transport that keeps reporting connected after disposal, which
+        /// this fixture has no way to build.
+        /// </remarks>
+        [TestMethod]
+        public void SendMessageAfterDisposeShouldThrowSshConnectionException()
+        {
+            Thread.Sleep(100);
+
+            Session.Dispose();
+
+            _ = Assert.ThrowsExactly<SshConnectionException>(() => Session.SendMessage(_ignoreMessage));
+        }
+
+        /// <summary>
+        /// A failed send is swallowed rather than propagated, which is what lets a channel close
+        /// sequence that arrives too late degrade to "not sent" instead of faulting its caller.
+        /// </summary>
+        [TestMethod]
+        public void TrySendMessageAfterDisposeShouldReturnFalse()
+        {
+            Thread.Sleep(100);
+
+            ISession session = Session;
+
+            Session.Dispose();
+
+            Assert.IsFalse(session.TrySendMessage(_ignoreMessage));
         }
     }
 }

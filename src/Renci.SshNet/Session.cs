@@ -184,6 +184,13 @@ namespace Renci.SshNet
 
         private HashAlgorithm _clientMac;
 
+        /// <summary>
+        /// Indicates that <see cref="_clientCipher"/> and <see cref="_clientMac"/> have been
+        /// disposed, so nothing may be sent any more. Written and read under
+        /// <see cref="_socketWriteLock"/>, which is what makes it reliable.
+        /// </summary>
+        private bool _outboundCryptoDisposed;
+
         private bool _serverEtm;
 
         private bool _clientEtm;
@@ -1082,6 +1089,16 @@ namespace Renci.SshNet
             // atomically, and only after the packet has actually been sent
             lock (_socketWriteLock)
             {
+                // The cipher and MAC below may have been disposed while this thread was on its way
+                // here - the transport check above passed, and then Dispose ran. Sending anyway
+                // reaches a disposed BCrypt key handle and dies of a NullReferenceException, which
+                // no caller expects; this is a connection error, and TrySendMessage already treats
+                // it as one.
+                if (_outboundCryptoDisposed)
+                {
+                    throw new SshConnectionException("Client not connected.");
+                }
+
                 var activeBufferLength = message.GetPacket(
                     ref _sendBuffer,
                     paddingMultiplier,
@@ -2153,11 +2170,6 @@ namespace Renci.SshNet
                     disposableServerCipher.Dispose();
                 }
 
-                if (_clientCipher is IDisposable disposableClientCipher)
-                {
-                    disposableClientCipher.Dispose();
-                }
-
                 var serverMac = _serverMac;
                 if (serverMac != null)
                 {
@@ -2165,11 +2177,28 @@ namespace Renci.SshNet
                     _serverMac = null;
                 }
 
-                var clientMac = _clientMac;
-                if (clientMac != null)
+                // The outbound pair is disposed under the write lock, unlike the inbound pair above:
+                // a send can still be in flight on another thread at this point, and a disconnect
+                // with many live channels — each owing a close sequence — is exactly when that
+                // happens. Without the lock such a send reached a disposed BCrypt key handle and
+                // threw NullReferenceException from inside BCryptEncrypt. The inbound pair needs no
+                // guard because Disconnect, called at the top of this method, waits for the message
+                // listener to complete before returning.
+                lock (_socketWriteLock)
                 {
-                    clientMac.Dispose();
-                    _clientMac = null;
+                    _outboundCryptoDisposed = true;
+
+                    if (_clientCipher is IDisposable disposableClientCipher)
+                    {
+                        disposableClientCipher.Dispose();
+                    }
+
+                    var clientMac = _clientMac;
+                    if (clientMac != null)
+                    {
+                        clientMac.Dispose();
+                        _clientMac = null;
+                    }
                 }
 
                 var serverDecompression = _serverDecompression;
