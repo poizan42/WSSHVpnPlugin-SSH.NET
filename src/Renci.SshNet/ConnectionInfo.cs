@@ -388,14 +388,23 @@ namespace Renci.SshNet
                     { "diffie-hellman-group1-sha1", () => new KeyExchangeDiffieHellman("diffie-hellman-group1-sha1", DHStandardGroups.rfc2409_1024, HashAlgorithmName.SHA1) },
                 };
 
+            // AEAD first, deliberately. RFC 4253 section 7.1 picks the first algorithm on the
+            // *client's* list that the server also offers, so this order is what decides the suite
+            // against any server that supports more than one. With the CTR entries first, a modern
+            // OpenSSH server still ended up on aes-ctr plus a separate HMAC pass, and that pass
+            // measured 12% of the plug-in host's CPU — all of it real SHA-256 work, on a CPU with
+            // AES-NI and PCLMULQDQ but no SHA extensions, where GCM's GHASH is hardware and SHA-256
+            // is not. Reordering only helps against servers that offer an AEAD suite; for one that
+            // does not, the list still falls through to CTR and CBC exactly as before, and the MAC
+            // cost there is inherent rather than fixed by this.
             Encryptions = new OrderedDictionary<string, CipherInfo>
                 {
+                    { "aes256-gcm@openssh.com", new CipherInfo(256, (key, iv) => new AesGcmCipher(key, iv, aadLength: 4), isAead: true) },
+                    { "aes128-gcm@openssh.com", new CipherInfo(128, (key, iv) => new AesGcmCipher(key, iv, aadLength: 4), isAead: true) },
+                    { "chacha20-poly1305@openssh.com", new CipherInfo(512, (key, iv) => new ChaCha20Poly1305Cipher(key, aadLength: 4), isAead: true) },
                     { "aes128-ctr", new CipherInfo(128, (key, iv) => new AesCipher(key, iv, AesCipherMode.CTR, pkcs7Padding: false)) },
                     { "aes192-ctr", new CipherInfo(192, (key, iv) => new AesCipher(key, iv, AesCipherMode.CTR, pkcs7Padding: false)) },
                     { "aes256-ctr", new CipherInfo(256, (key, iv) => new AesCipher(key, iv, AesCipherMode.CTR, pkcs7Padding: false)) },
-                    { "aes128-gcm@openssh.com", new CipherInfo(128, (key, iv) => new AesGcmCipher(key, iv, aadLength: 4), isAead: true) },
-                    { "aes256-gcm@openssh.com", new CipherInfo(256, (key, iv) => new AesGcmCipher(key, iv, aadLength: 4), isAead: true) },
-                    { "chacha20-poly1305@openssh.com", new CipherInfo(512, (key, iv) => new ChaCha20Poly1305Cipher(key, aadLength: 4), isAead: true) },
                     { "aes128-cbc", new CipherInfo(128, (key, iv) => new AesCipher(key, iv, AesCipherMode.CBC, pkcs7Padding: false)) },
                     { "aes192-cbc", new CipherInfo(192, (key, iv) => new AesCipher(key, iv, AesCipherMode.CBC, pkcs7Padding: false)) },
                     { "aes256-cbc", new CipherInfo(256, (key, iv) => new AesCipher(key, iv, AesCipherMode.CBC, pkcs7Padding: false)) },
